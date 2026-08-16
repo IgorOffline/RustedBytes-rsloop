@@ -18,6 +18,10 @@ test: tls-test-certs
 
 test-frameworks:
     uv run --with uvicorn python tests/packages/uvicorn_test.py
+    uv run --with daphne python tests/packages/daphne_test.py
+    uv run --with hypercorn python tests/packages/hypercorn_test.py
+    uv run --with mangum python tests/packages/mangum_test.py
+    uv run --with granian --with litestar python tests/packages/litestar_granian_test.py
     uv run --with fastapi --with uvicorn python tests/packages/fastapi_test.py
     uv run --with starlette --with uvicorn python tests/packages/starlette_test.py
     uv run --with aiohttp python tests/packages/aiohttp_test.py

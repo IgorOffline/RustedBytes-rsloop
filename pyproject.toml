@@ -57,6 +57,7 @@ dev = [
 # Dependencies for the library/framework tests in tests/packages
 test = [
     "aiohttp>=3.14.3",
+    "daphne>=4.2.3",
     "django>=5.2.17",
     "falcon>=4.1.0",
     "fastapi>=0.124.4",
@@ -64,6 +65,7 @@ test = [
     "granian>=1.6.4",
     "hypercorn>=0.17.3",
     "litestar>=2.24.0",
+    "mangum>=0.21.0",
     "quart>=0.19.9",
     "sanic>=23.12.1,<24; python_version < '3.10'",
     "sanic>=25.3.0; python_version >= '3.10'",
