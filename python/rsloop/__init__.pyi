@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from asyncio import DefaultEventLoopPolicy
+from collections.abc import Callable, Coroutine
+from typing import Any, ContextManager, TypeVar
+
+from ._loop import PyLoop
+
+_T = TypeVar("_T")
+
+Loop = PyLoop
+
+__version__: str
+
+class EventLoopPolicy(DefaultEventLoopPolicy):
+    def new_event_loop(self) -> Loop: ...
+
+def install() -> None: ...
+def uninstall() -> None: ...
+def new_event_loop() -> Loop: ...
+def run(
+    main: Coroutine[Any, Any, _T],
+    *,
+    loop_factory: Callable[[], Loop] = ...,
+    debug: bool | None = ...,
+) -> _T: ...
+
+def profiler_compiled() -> bool: ...
+def profiler_running() -> bool: ...
+def start_profiler() -> None: ...
+def stop_profiler() -> None: ...
+def profile() -> ContextManager[None]: ...
+
+__all__: tuple[str, ...]

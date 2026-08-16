@@ -41,13 +41,16 @@ Issues = "https://github.com/RustedBytes/rsloop/issues"
 python-source = "python"
 module-name = "rsloop._loop"
 features = ["pyo3/extension-module"]
+include = ["python/rsloop/_loop.pyi"]
 
 [dependency-groups]
 dev = [
     "maturin>=1.14.1",
     "mkdocs>=1.6.1",
+    "pyright>=1.1.400",
     "ruff>=0.15.19",
     "rust-just>=1.54.0",
+    "typing-extensions>=4.0",
     { include-group = "test" },
 ]
 # Dependencies for the library/framework tests in tests/packages

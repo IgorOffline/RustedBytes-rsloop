@@ -1,0 +1,7 @@
+{
+  "include": ["typing_tests"],
+  "extraPaths": ["python"],
+  "stubPath": "python",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "strict"
+}
