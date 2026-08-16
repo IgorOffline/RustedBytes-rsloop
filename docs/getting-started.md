@@ -28,11 +28,13 @@ The package exports a small public surface:
 
 - `rsloop.Loop`
 - `rsloop.EventLoopPolicy`
+- `rsloop.__version__`
 - `rsloop.new_event_loop()`
 - `rsloop.run(...)`
 - `rsloop.install()`
 - `rsloop.uninstall()`
 - `rsloop.profile()`
+- `rsloop.profiler_compiled()`
 - `rsloop.start_profiler()`
 - `rsloop.stop_profiler()`
 - `rsloop.profiler_running()`
@@ -134,6 +136,11 @@ The `examples/` directory is the best hands-on tour of the project:
 - `examples/03_streams.py`: TCP protocols, connections, and servers
 - `examples/04_unix_and_accepted_socket.py`: Unix sockets and accepted sockets
 - `examples/05_pipes_signals_subprocesses.py`: pipes, signals, and subprocesses
+- `examples/fastapi_service.py`: a FastAPI service with selectable event loops
+- `examples/picows_server.py`: a Picows WebSocket server
+- `examples/picows_test.py`: a Picows client for the example server
+- `examples/wsbench_websockets.py`: a WebSocket benchmark server
+- `examples/rust/`: a PyO3 extension that returns Rust-backed awaitables
 
 If you are new to lower-level `asyncio` features, start with `01_basics.py` and `03_streams.py`.
 

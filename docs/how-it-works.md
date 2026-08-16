@@ -63,17 +63,21 @@ You do not need to understand every file before using the project. For a first p
 
 ## Runtime model
 
-Each loop owns a `vibeio` runtime on its dedicated Rust coordination thread.
+Each loop currently uses two related execution contexts:
 
-The simple explanation is:
+- a per-loop `vibeio` runtime lives on the thread running the Python event loop;
+  it drives direct I/O while the loop is parked
+- a dedicated Rust coordination thread dispatches loop commands, timers, and
+  compatibility paths through a separate `vibeio` runtime
 
-- there is a dedicated Rust runtime thread for loop coordination
 - Python tasks and callbacks still execute on the Python side
 - plain TCP / Unix reads and non-TLS accepts run directly on `vibeio`
 - generic descriptor watches and some TLS, write, and older transport paths
   still use helper threads
 
-That is important because it explains why the project is fast in some areas while still being a work in progress in others.
+The separate coordination thread is transitional infrastructure. This hybrid
+model explains why some paths run directly through the loop-thread reactor while
+other paths still cross threads or use helper workers.
 
 ## Compatibility goal
 

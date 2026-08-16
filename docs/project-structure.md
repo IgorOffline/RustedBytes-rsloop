@@ -59,6 +59,7 @@ This directory shows the supported feature areas in runnable form.
 - subprocesses
 - a FastAPI service for comparing stdlib `asyncio`, `uvloop`, and `rsloop`
 - WebSocket examples
+- a separate PyO3 extension that exposes Rust futures as Python awaitables
 
 Examples are a good first stop before reading tests.
 
@@ -71,6 +72,8 @@ The tests tell you what behavior the project promises today.
 - `test_run.py`: basic lifecycle and common operations
 - `test_compat.py`: `asyncio` compatibility behaviors
 - `test_tls.py`: TLS-related behavior
+- `test_public_api.py`: static type checks for the exported Python API
+- `packages/`: smoke tests against supported frameworks and ASGI servers
 
 When you are unsure whether a feature is expected to work, check the tests.
 

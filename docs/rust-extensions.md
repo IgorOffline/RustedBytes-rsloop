@@ -102,12 +102,18 @@ Your extension crate should depend on:
 ```toml
 [dependencies]
 async-std = "1"
-pyo3 = { version = "0.28", features = ["extension-module"] }
-rsloop = { version = "0.1.14" }
+pyo3 = { version = "0.29", features = ["extension-module"] }
+rsloop = { version = "0.1.32" }
 ```
 
-For a real package, replace the path dependency with the form that matches your
-project layout.
+Keep your PyO3 version aligned with the version used by `rsloop`, because the
+interop helpers expose PyO3 types in their public signatures. When developing
+against a local checkout, replace the version dependency with a path dependency,
+as the bundled example does:
+
+```toml
+rsloop = { path = "../path/to/rsloop" }
+```
 
 Your `pyproject.toml` should use `maturin` in the normal PyO3 way:
 

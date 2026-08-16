@@ -19,15 +19,22 @@ uv run --with maturin maturin develop --release
 ## Run tests
 
 ```bash
-uv run pytest
+uv run python -m unittest discover -s tests
 ```
 
-If you want to focus on one area:
+The `just` recipe also regenerates the TLS fixtures before running the suite:
 
 ```bash
-uv run pytest tests/test_run.py
-uv run pytest tests/test_compat.py
-uv run pytest tests/test_tls.py
+uv run just test
+```
+
+If you want to focus on one area, use `unittest` discovery with a filename
+pattern:
+
+```bash
+uv run python -m unittest discover -s tests -p 'test_run.py'
+uv run python -m unittest discover -s tests -p 'test_compat.py'
+uv run python -m unittest discover -s tests -p 'test_tls.py'
 ```
 
 ## Build the docs
@@ -73,8 +80,8 @@ Those four questions usually point you to the right part of the codebase.
 ## Profiling
 
 Profiling support exists behind the Rust `profiler` feature and uses Tracy.
-Release wheels for Linux and macOS include this feature; local development
-builds need it enabled explicitly.
+Published wheels do not currently include this feature. Local development
+builds must enable it explicitly.
 
 Example build:
 
@@ -85,8 +92,13 @@ uv run --with maturin maturin develop --release --features profiler
 The Python API then exposes:
 
 - `rsloop.profile()`
+- `rsloop.profiler_compiled()`
+- `rsloop.profiler_running()`
 - `rsloop.start_profiler()`
 - `rsloop.stop_profiler()`
+
+Use `rsloop.profiler_compiled()` to check whether the installed build includes
+Tracy support before starting a profiling session.
 
 ## Current state of the project
 

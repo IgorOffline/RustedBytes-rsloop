@@ -254,3 +254,7 @@ For fuller examples, read the repository files in `examples/`:
 - `03_streams.py`
 - `04_unix_and_accepted_socket.py`
 - `05_pipes_signals_subprocesses.py`
+- `fastapi_service.py`
+- `picows_server.py` and `picows_test.py`
+- `wsbench_websockets.py`
+- `rust/`: a complete Rust async extension example
