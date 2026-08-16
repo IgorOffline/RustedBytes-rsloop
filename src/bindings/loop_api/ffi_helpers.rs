@@ -1,4 +1,4 @@
-//! Small, audited CPython FFI call helpers.
+//! Small, audited `CPython` FFI call helpers.
 
 use pyo3::ffi;
 use pyo3::prelude::*;

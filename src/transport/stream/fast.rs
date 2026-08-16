@@ -170,11 +170,11 @@ struct ExactReadAccumulator {
 
 impl ExactReadAccumulator {
     fn new(py: Python<'_>, expected: usize) -> PyResult<Self> {
+        let expected_size = ffi::Py_ssize_t::try_from(expected)
+            .map_err(|_| pyo3::exceptions::PyOverflowError::new_err("read size is too large"))?;
         // SAFETY: The object is retained only inside this waiter and is not
         // exposed to Python until all `expected` bytes have been initialized.
-        let ptr = unsafe {
-            ffi::PyBytes_FromStringAndSize(core::ptr::null(), expected as ffi::Py_ssize_t)
-        };
+        let ptr = unsafe { ffi::PyBytes_FromStringAndSize(core::ptr::null(), expected_size) };
         if ptr.is_null() {
             return Err(PyErr::fetch(py));
         }
@@ -553,12 +553,13 @@ impl PyFastStreamReader {
             }
             return self.start_waiter(py, "read", ReadWaitKind::All);
         }
+        let n = usize::try_from(n).expect("nonnegative read size fits usize");
         if !self.buffer.is_empty() || self.eof {
-            let data = self.unread_bytes_object(py, n as usize);
+            let data = self.unread_bytes_object(py, n);
             self.maybe_resume_transport(py)?;
             return self.ready_result_future(py, data);
         }
-        self.start_waiter(py, "read", ReadWaitKind::Any(n as usize))
+        self.start_waiter(py, "read", ReadWaitKind::Any(n))
     }
 
     fn build_readexactly_future(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {

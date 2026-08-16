@@ -19,7 +19,9 @@ pub(super) fn file_from_fd(fd: fd_ops::RawFd) -> PyResult<File> {
     {
         let dup = fd_ops::dup_raw_fd(fd as fd_ops::RawFd)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        Ok(file_from_owned_fd(dup as i32))
+        let dup = i32::try_from(dup)
+            .map_err(|_| PyRuntimeError::new_err("duplicated fd out of range"))?;
+        Ok(file_from_owned_fd(dup))
     }
 }
 

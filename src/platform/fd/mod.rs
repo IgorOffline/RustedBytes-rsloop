@@ -38,7 +38,7 @@ pub fn dup_raw_fd(fd: RawFd) -> io::Result<RawFd> {
         if duped < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(duped as RawFd)
+        Ok(RawFd::from(duped))
     }
 
     #[cfg(windows)]
@@ -83,21 +83,21 @@ pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Resul
         return Err(err);
     }
 
-    let revents = pollfd.revents as i32;
+    let revents = i32::from(pollfd.revents);
     // POLLNVAL means the descriptor is not open (e.g. the socket was closed
     // out from under the watcher). Reporting it as "ready" would make
     // watchers fire forever on a dead fd, so surface it as an error instead;
     // a closed fd produces no readiness events on asyncio either.
-    if revents & (libc::POLLNVAL as i32) != 0 {
+    if revents & i32::from(libc::POLLNVAL) != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "file descriptor is not open",
         ));
     }
-    let error_bits = (libc::POLLERR | libc::POLLHUP) as i32;
+    let error_bits = i32::from(libc::POLLERR | libc::POLLHUP);
     Ok((
-        read && (revents & ((libc::POLLIN as i32) | error_bits)) != 0,
-        write && (revents & ((libc::POLLOUT as i32) | error_bits)) != 0,
+        read && (revents & (i32::from(libc::POLLIN) | error_bits)) != 0,
+        write && (revents & (i32::from(libc::POLLOUT) | error_bits)) != 0,
     ))
 }
 
@@ -196,14 +196,14 @@ fn raw_fd_to_c_int(fd: RawFd) -> io::Result<libc::c_int> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "descriptor out of range"))
 }
 
-/// A connect() attempt that is still completing in the background.
+/// A `connect()` attempt that is still completing in the background.
 #[cfg(unix)]
 #[inline]
 pub fn is_connect_in_progress_errno(errno: i32) -> bool {
     errno == libc::EINPROGRESS || errno == libc::EALREADY || errno == libc::EWOULDBLOCK
 }
 
-/// The socket is already connected (a benign outcome for connect()).
+/// The socket is already connected (a benign outcome for `connect()`).
 #[cfg(unix)]
 #[inline]
 pub fn is_already_connected_errno(errno: i32) -> bool {

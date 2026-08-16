@@ -116,8 +116,7 @@ pub fn run_in_context(
 
     match (callback_result, exit_result) {
         (Ok(result), Ok(())) => Ok(result),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
+        (Err(err), _) | (Ok(_), Err(err)) => Err(err),
     }
 }
 
@@ -145,8 +144,7 @@ pub fn run_in_context_noargs(
 
     match (callback_result, exit_result) {
         (Ok(result), Ok(())) => Ok(result),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
+        (Err(err), _) | (Ok(_), Err(err)) => Err(err),
     }
 }
 
@@ -175,8 +173,7 @@ pub fn run_in_context_onearg(
 
     match (callback_result, exit_result) {
         (Ok(result), Ok(())) => Ok(result),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err),
+        (Err(err), _) | (Ok(_), Err(err)) => Err(err),
     }
 }
 

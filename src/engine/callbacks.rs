@@ -145,8 +145,7 @@ impl ReadyCallback {
 
         match (callback_result, exit_result) {
             (Ok(result), Ok(())) => Ok(result),
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
+            (Err(err), _) | (Ok(_), Err(err)) => Err(err),
         }
     }
 

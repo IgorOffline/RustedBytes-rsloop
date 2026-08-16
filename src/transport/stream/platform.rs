@@ -18,7 +18,7 @@ use std::os::windows::io::{
 
 #[cfg(unix)]
 pub(super) fn file_raw_fd(file: &File) -> fd_ops::RawFd {
-    file.as_raw_fd() as fd_ops::RawFd
+    fd_ops::RawFd::from(file.as_raw_fd())
 }
 
 #[cfg(windows)]
@@ -29,7 +29,7 @@ pub(super) fn file_raw_fd(file: &File) -> fd_ops::RawFd {
 #[cfg(unix)]
 #[inline]
 pub(super) fn tcp_stream_raw_fd(stream: &TcpStream) -> fd_ops::RawFd {
-    stream.as_raw_fd() as fd_ops::RawFd
+    fd_ops::RawFd::from(stream.as_raw_fd())
 }
 
 #[cfg(windows)]
@@ -40,7 +40,7 @@ pub(super) fn tcp_stream_raw_fd(stream: &TcpStream) -> fd_ops::RawFd {
 
 #[cfg(unix)]
 pub(super) fn tcp_listener_raw_fd(listener: &TcpListener) -> fd_ops::RawFd {
-    listener.as_raw_fd() as fd_ops::RawFd
+    fd_ops::RawFd::from(listener.as_raw_fd())
 }
 
 #[cfg(windows)]
@@ -51,7 +51,7 @@ pub(super) fn tcp_listener_raw_fd(listener: &TcpListener) -> fd_ops::RawFd {
 #[cfg(unix)]
 #[inline]
 pub(super) fn unix_raw_fd(fd: std::os::fd::RawFd) -> fd_ops::RawFd {
-    fd as fd_ops::RawFd
+    fd_ops::RawFd::from(fd)
 }
 
 #[cfg(unix)]

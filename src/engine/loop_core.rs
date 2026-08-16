@@ -221,8 +221,8 @@ pub struct SignalHandlerTemplate {
 /// One fd watch registration. `ready` is the single callback shared with the
 /// watcher task; cancelling it neutralizes fires that are already queued.
 /// `fileobj` keeps the registered file object alive and lets
-/// remove_reader()/remove_writer() find the registration by identity even
-/// after the file object has been closed (fileno() == -1).
+/// `remove_reader()`/`remove_writer()` find the registration by identity even
+/// after the file object has been closed (`fileno()` == -1).
 pub struct FdWatch {
     pub fileobj: Py<PyAny>,
     pub ready: Arc<ReadyCallback>,
@@ -1053,8 +1053,8 @@ impl LoopCore {
     }
 
     /// Resolves a TCP connect whose writability wait finished on the vibeio
-    /// reactor. Runs on the loop thread so the SO_ERROR check and the
-    /// set_result / set_exception happen with the GIL already held for the
+    /// reactor. Runs on the loop thread so the `SO_ERROR` check and the
+    /// `set_result` / `set_exception` happen with the GIL already held for the
     /// whole ready batch — no per-completion GIL handoff.
     #[cfg(unix)]
     fn resolve_connect_completed(

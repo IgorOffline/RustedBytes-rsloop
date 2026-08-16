@@ -1,4 +1,4 @@
-//! PyO3 event-loop bindings and adapters into the Rust engine.
+//! `PyO3` event-loop bindings and adapters into the Rust engine.
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -1123,7 +1123,7 @@ impl Default for UnixPreExecConfig {
 static PIPE_CELL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Default for an omitted `stdin`/`stdout`/`stderr`: `subprocess.PIPE` (== -1),
-/// matching CPython's loop methods. An explicit `None` arrives as `Option::None`
+/// matching `CPython`'s loop methods. An explicit `None` arrives as `Option::None`
 /// instead and is honored as "inherit the parent's fd" by `parse_process_stdio`.
 fn default_stdio_pipe() -> Py<PyAny> {
     Python::attach(|py| {
@@ -1473,7 +1473,8 @@ fn apply_unix_misc_process_kw(kw: &mut UnixProcessKw<'_, '_>) -> PyResult<bool> 
                 if !(0..=PROCESS_UMASK_MAX).contains(&mask) {
                     return Err(PyValueError::new_err("umask must be between 0 and 0o777"));
                 }
-                kw.unix.umask = Some(mask as u32);
+                kw.unix.umask =
+                    Some(u32::try_from(mask).expect("validated umask is nonnegative and fits u32"));
             }
         }
         "preexec_fn" => {
@@ -2870,12 +2871,11 @@ impl PyLoop {
 
             while sent < total {
                 let wrote = match Python::attach(|py| -> PyResult<usize> {
-                    let chunk = data.bind(py).get_item(PySlice::new(
-                        py,
-                        sent as isize,
-                        total as isize,
-                        1,
-                    ))?;
+                    let sent =
+                        isize::try_from(sent).expect("Python object length fits in Py_ssize_t");
+                    let total =
+                        isize::try_from(total).expect("Python object length fits in Py_ssize_t");
+                    let chunk = data.bind(py).get_item(PySlice::new(py, sent, total, 1))?;
                     sock.call_method1(py, "send", (chunk,))?.extract(py)
                 }) {
                     Ok(wrote) => wrote,

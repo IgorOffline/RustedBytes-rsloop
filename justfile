@@ -10,6 +10,9 @@ fmt:
     uv run ruff format .
     cargo fmt --all
 
+clippy:
+    cargo clippy --all-targets --all-features -- -D warnings
+
 test: tls-test-certs
     uv run python -m unittest discover -s tests
 

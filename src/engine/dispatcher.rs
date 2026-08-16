@@ -368,8 +368,7 @@ impl RuntimeDispatcher {
                         }
                         match fd_ops::poll_fd(fd, true, false, 50) {
                             Ok((true, _)) => break,
-                            Ok((false, false)) => continue,
-                            Ok((false, true)) => continue,
+                            Ok((false, _)) => continue,
                             Err(_) => return,
                         }
                     }
@@ -403,8 +402,7 @@ impl RuntimeDispatcher {
                             }
                             match fd_ops::poll_fd(fd, false, true, 50) {
                                 Ok((false, true)) => break,
-                                Ok((false, false)) => continue,
-                                Ok((true, _)) => continue,
+                                Ok((false, false) | (true, _)) => continue,
                                 Err(_) => return,
                             }
                         }

@@ -1348,10 +1348,9 @@ impl StreamTransportCore {
                     pyo3::ffi::PyMemoryView_FromObject(buffer_obj.bind(py).as_ptr()),
                 )
             }?;
-            memoryview.set_item(
-                PySlice::new(py, 0, data.len() as isize, 1),
-                PyBytes::new(py, data),
-            )?;
+            let data_len =
+                isize::try_from(data.len()).expect("Python buffer length fits in Py_ssize_t");
+            memoryview.set_item(PySlice::new(py, 0, data_len, 1), PyBytes::new(py, data))?;
             let updated_args = PyTuple::new(py, [data.len()])?.unbind();
             run_in_context(
                 py,
@@ -3545,7 +3544,7 @@ fn run_unix_accept_loop(params: BlockingAcceptLoop<StdUnixListener>) {
             return;
         }
 
-        match poll_read_ready(listener.as_raw_fd() as fd_ops::RawFd) {
+        match poll_read_ready(fd_ops::RawFd::from(listener.as_raw_fd())) {
             Ok(false) => continue,
             Ok(true) => {}
             Err(err) => {
@@ -3933,7 +3932,7 @@ fn spin_read_stream(
 /// Starts the socket reader for a stream transport.
 ///
 /// Readers stay on the transitional runtime thread. Hosting them on the loop
-/// runtime was attempted but reverted: it segfaults for AF_UNIX socketpair
+/// runtime was attempted but reverted: it segfaults for `AF_UNIX` socketpair
 /// sockets and races `start_tls`, which reclaims the fd for a blocking handshake
 /// while the reader still holds a non-blocking registration (EAGAIN). Reader
 /// migration only benefits the traffic path (already ahead of uvloop), so the
@@ -4372,11 +4371,7 @@ fn handle_stream_writer_command(
             write_stream_data_batch(core, writer, writer_rx, data, pending_command)
         }
         WriterCommand::WriteEof => handle_stream_write_eof(core, writer),
-        WriterCommand::Close => {
-            report_writer_close_result(core, writer.shutdown_close());
-            false
-        }
-        WriterCommand::Abort => {
+        WriterCommand::Close | WriterCommand::Abort => {
             report_writer_close_result(core, writer.shutdown_close());
             false
         }
@@ -4704,7 +4699,9 @@ fn wait_socket_ready_until(
             let remaining_ms = deadline
                 .saturating_duration_since(now)
                 .as_millis()
-                .clamp(1, i32::MAX as u128) as i32;
+                .clamp(1, u128::from(i32::MAX.unsigned_abs()));
+            let remaining_ms =
+                i32::try_from(remaining_ms).expect("poll timeout is clamped to i32::MAX");
             match fd_ops::poll_fd(fd, read, write, remaining_ms) {
                 Ok((read_ready, write_ready))
                     if (!read || read_ready) && (!write || write_ready) =>

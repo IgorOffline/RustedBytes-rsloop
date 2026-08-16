@@ -735,7 +735,7 @@ fn spawn_stdin_pipe_transport(
     extra_entries: Option<HashMap<String, Py<PyAny>>>,
 ) -> PyResult<Py<PyAny>> {
     #[cfg(unix)]
-    let file_obj: Py<PyAny> = make_python_pipe_file(py, stdin.as_raw_fd() as i64, "wb")?;
+    let file_obj: Py<PyAny> = make_python_pipe_file(py, i64::from(stdin.as_raw_fd()), "wb")?;
     #[cfg(windows)]
     let file_obj: Py<PyAny> = make_python_pipe_file_from_handle(py, stdin.as_raw_handle(), "wb")?;
     let stdin_protocol = Py::new(py, PyProcessStdinProtocol { core: core.clone() })?.into_any();
@@ -922,9 +922,12 @@ fn report_process_io_error(core: &Arc<ProcessTransportCore>, err: std::io::Error
 
 #[cfg(unix)]
 fn send_process_signal(child: &Child, signal: i32) -> std::io::Result<()> {
+    let pid = i32::try_from(child.id()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "child PID out of range")
+    })?;
     // SAFETY: `libc::kill` is called with the child PID returned by `std::process::Child`
     // and a signal value supplied by the caller/Python API. It does not retain pointers.
-    let result = unsafe { libc::kill(child.id() as i32, signal) };
+    let result = unsafe { libc::kill(pid, signal) };
     if result == 0 {
         Ok(())
     } else {
@@ -1008,7 +1011,7 @@ fn handle_process_command(
 
 fn run_process_reader(core: Arc<ProcessTransportCore>, fd: i32, mut reader: BoxedProcessReader) {
     profiling::scope!("process.run_reader");
-    let mut buf = [0_u8; PROCESS_READER_BUFFER_SIZE];
+    let mut buf = vec![0_u8; PROCESS_READER_BUFFER_SIZE].into_boxed_slice();
     loop {
         match reader.read(&mut buf) {
             Ok(0) => {

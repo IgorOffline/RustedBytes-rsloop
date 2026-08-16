@@ -16,6 +16,21 @@ Build the extension and install it into the current environment:
 uv run --with maturin maturin develop --release
 ```
 
+## Run Rust lints
+
+Clippy runs with its pedantic lint group enabled by the project manifest, and
+the development command treats every warning as an error:
+
+```bash
+uv run just clippy
+```
+
+The equivalent Cargo command is:
+
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
 ## Run tests
 
 ```bash

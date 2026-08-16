@@ -123,8 +123,9 @@ fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<()> {
         }
     }
     if let Some(umask) = config.umask {
+        let umask = libc::mode_t::try_from(umask).expect("validated umask fits mode_t");
         // SAFETY: called only inside the `pre_exec` child with a validated mode value.
-        unsafe { libc::umask(umask as libc::mode_t) };
+        unsafe { libc::umask(umask) };
     }
 
     Ok(())
