@@ -65,6 +65,11 @@ time = []
 name = "vibeio"
 path = "src/lib.rs"
 
+[[bench]]
+name = "runtime"
+path = "benches/runtime.rs"
+harness = false
+
 [dependencies.async-channel]
 version = "2.5.0"
 optional = true

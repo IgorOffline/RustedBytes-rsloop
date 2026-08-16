@@ -62,7 +62,7 @@ class RunTests(unittest.TestCase):
             if sys.platform == "win32"
             else "io_uring"
             if sys.platform.startswith("linux")
-            else "mio"
+            else "kqueue"
         )
 
         self.assertEqual(
@@ -74,6 +74,8 @@ class RunTests(unittest.TestCase):
                 "target_arch",
                 "free_threaded",
                 "reactor",
+                "runtime_profile",
+                "minimum_os",
                 "tls_backend",
                 "profiler",
             },
@@ -84,6 +86,8 @@ class RunTests(unittest.TestCase):
         self.assertTrue(info["target_arch"])
         self.assertIsInstance(info["free_threaded"], bool)
         self.assertEqual(info["reactor"], expected_reactor)
+        self.assertEqual(info["runtime_profile"], "rsloop")
+        self.assertTrue(info["minimum_os"])
         self.assertEqual(info["tls_backend"], "rustls")
         self.assertEqual(info["profiler"], rsloop.profiler_compiled())
 

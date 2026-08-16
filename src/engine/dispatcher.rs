@@ -113,6 +113,7 @@ pub fn run_runtime_thread(core: Arc<LoopCore>, command_rx: Receiver<LoopCommand>
         tracy_client::set_thread_name!("rsloop-runtime");
     }
     let runtime = vibeio::RuntimeBuilder::new()
+        .rsloop_profile()
         .enable_timer(true)
         .build()
         .expect("failed to initialize vibeio runtime");

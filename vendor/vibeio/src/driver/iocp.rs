@@ -40,6 +40,7 @@ use crate::{
 const INTERRUPT_KEY: usize = usize::MAX;
 const AFD_POLL_COMPLETION_KEY: usize = usize::MAX - 1;
 const IOCP_BATCH_SIZE: usize = 128;
+const IOCP_DRAIN_BATCHES: usize = 8;
 
 const STATUS_PENDING: NTSTATUS = 0x0000_0103;
 const IOCTL_AFD_POLL: u32 = 0x0001_2024;
@@ -130,6 +131,7 @@ struct AfdIoStatusCtx {
 
 struct PollOp {
     registration_token: usize,
+    registration_generation: u64,
     io_status: Box<AfdIoStatusCtx>,
     _input: Box<AfdPollInfo>,
     _output: Box<AfdPollInfo>,
@@ -140,6 +142,7 @@ struct PollRegistration {
     waiter: Option<Waker>,
     interest: Interest,
     poll_token: Option<usize>,
+    generation: u64,
 }
 
 enum HandleRegistration {
@@ -151,6 +154,7 @@ struct DriverState {
     registrations: Slab<HandleRegistration>,
     completions: Slab<Completion>,
     poll_ops: Slab<PollOp>,
+    next_registration_generation: u64,
 }
 
 pub struct IocpDriver {
@@ -176,6 +180,7 @@ impl IocpDriver {
                 registrations: Slab::with_capacity(1024),
                 completions: Slab::with_capacity(1024),
                 poll_ops: Slab::with_capacity(1024),
+                next_registration_generation: 0,
             }),
         })
     }
@@ -420,11 +425,12 @@ impl IocpDriver {
         let (poll_token, io_status_ptr, input_ptr, output_ptr) = {
             let mut state = self.state.borrow_mut();
 
-            match state.registrations.get(registration_token) {
+            let registration_generation = match state.registrations.get(registration_token) {
                 Some(HandleRegistration::Poll(registration)) => {
                     if registration.poll_token.is_some() {
                         return Ok(());
                     }
+                    registration.generation
                 }
                 Some(HandleRegistration::Completion) => {
                     return Err(io::Error::new(
@@ -444,7 +450,7 @@ impl IocpDriver {
                         ),
                     ));
                 }
-            }
+            };
 
             let mut io_status = Box::new(unsafe { std::mem::zeroed::<AfdIoStatusCtx>() });
             let mut input = Box::new(AfdPollInfo::new(socket, poll_events));
@@ -460,6 +466,7 @@ impl IocpDriver {
 
             poll_entry.insert(PollOp {
                 registration_token,
+                registration_generation,
                 io_status,
                 _input: input,
                 _output: output,
@@ -562,21 +569,23 @@ impl IocpDriver {
                 // SAFETY: every AFD poll submission passes a pointer to AfdIoStatusCtx::io_status,
                 // and AfdIoStatusCtx is repr(C) with io_status as its first field.
                 let poll_token = unsafe { (*entry.lpOverlapped.cast::<AfdIoStatusCtx>()).token };
-                let registration_token = state
+                let registration = state
                     .poll_ops
                     .get(poll_token)
-                    .map(|poll| poll.registration_token);
+                    .map(|poll| (poll.registration_token, poll.registration_generation));
                 let _ = state.poll_ops.try_remove(poll_token);
 
-                if let Some(registration_token) = registration_token {
+                if let Some((registration_token, generation)) = registration {
                     if let Some(HandleRegistration::Poll(registration)) =
                         state.registrations.get_mut(registration_token)
                     {
-                        if registration.poll_token == Some(poll_token) {
-                            registration.poll_token = None;
-                        }
-                        if let Some(waiter) = registration.waiter.take() {
-                            waiter.wake();
+                        if registration.generation == generation {
+                            if registration.poll_token == Some(poll_token) {
+                                registration.poll_token = None;
+                            }
+                            if let Some(waiter) = registration.waiter.take() {
+                                waiter.wake();
+                            }
                         }
                     }
                 }
@@ -642,7 +651,11 @@ impl IocpDriver {
 
     #[inline]
     fn process_ready_completions(&self) -> Result<(), io::Error> {
-        while self.process_batch(0)? > 0 {}
+        for _ in 0..IOCP_DRAIN_BATCHES {
+            if self.process_batch(0)? == 0 {
+                break;
+            }
+        }
         Ok(())
     }
 }
@@ -718,6 +731,12 @@ impl Driver for IocpDriver {
                 self.ensure_afd_handle()?;
 
                 let mut state = self.state.borrow_mut();
+                state.next_registration_generation =
+                    state.next_registration_generation.wrapping_add(1);
+                if state.next_registration_generation == 0 {
+                    state.next_registration_generation = 1;
+                }
+                let generation = state.next_registration_generation;
                 let entry = state.registrations.vacant_entry();
                 let token = Token(entry.key());
                 entry.insert(HandleRegistration::Poll(PollRegistration {
@@ -725,6 +744,7 @@ impl Driver for IocpDriver {
                     waiter: None,
                     interest,
                     poll_token: None,
+                    generation,
                 }));
                 Ok(token)
             }

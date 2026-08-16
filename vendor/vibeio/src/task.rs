@@ -10,17 +10,21 @@ use futures_util::future::LocalBoxFuture;
 
 use crate::driver::AnyInterruptor;
 
+pub(crate) struct RemoteWakeContext {
+    pub(crate) queue: Arc<SegQueue<usize>>,
+    pub(crate) interruptor: AnyInterruptor,
+    pub(crate) waiting: Arc<AtomicBool>,
+    pub(crate) interrupt_pending: Arc<AtomicBool>,
+}
+
 pub struct Task {
     pub future: RefCell<Option<LocalBoxFuture<'static, ()>>>,
     pub queue: Weak<UnsafeCell<VecDeque<Arc<Task>>>>,
     pub next_task: Weak<RefCell<Option<Arc<Task>>>>,
-    pub remote_queue: std::sync::Weak<SegQueue<usize>>,
-    pub interruptor: AnyInterruptor,
+    pub remote_wake: std::sync::Weak<RemoteWakeContext>,
     pub queued: AtomicBool,
     pub thread_id: std::thread::ThreadId,
     pub token: usize,
-    pub waiting: std::sync::Weak<AtomicBool>,
-    pub interrupt_pending: std::sync::Weak<AtomicBool>,
 }
 
 impl Task {
@@ -94,25 +98,18 @@ impl Task {
             return;
         }
 
+        let Some(remote) = task.remote_wake.upgrade() else {
+            return;
+        };
         if !task.queued.swap(true, Ordering::Relaxed) {
-            if let Some(remote_queue) = task.remote_queue.upgrade() {
-                remote_queue.push(task.token);
-            }
+            remote.queue.push(task.token);
         }
 
-        // Interrupt the driver if it's waiting
-        if task
-            .waiting
-            .upgrade()
-            .is_some_and(|waiting| waiting.load(Ordering::Acquire))
-        {
-            let should_interrupt = task
-                .interrupt_pending
-                .upgrade()
-                .is_none_or(|pending| !pending.swap(true, Ordering::AcqRel));
+        // Interrupt the driver if it's waiting.
+        if remote.waiting.load(Ordering::Acquire) {
+            let should_interrupt = !remote.interrupt_pending.swap(true, Ordering::AcqRel);
             if should_interrupt {
-                // Interrupt the driver if the waker is not on the same thread as the runtime
-                task.interruptor.interrupt();
+                remote.interruptor.interrupt();
             }
         }
     }

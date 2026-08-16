@@ -9,8 +9,8 @@
 `rsloop` is a PyO3-based `asyncio` event loop implemented in Rust.
 
 Each `rsloop.Loop` owns a dedicated Rust runtime thread for loop coordination
-and I/O work. That thread runs a `vibeio` runtime, using io_uring on Linux,
-IOCP on Windows, and mio-backed readiness on other supported platforms. Plain
+and I/O work. That thread runs an rsloop-specialized `vibeio` runtime, using
+io_uring on Linux, IOCP on Windows, and native kqueue readiness on macOS. Plain
 TCP / Unix socket reads and non-TLS server accepts run on that runtime. Python
 callbacks, tasks, and coroutines still run on the thread that calls
 `run_forever()` or `run_until_complete()` (usually the main Python thread).
@@ -24,6 +24,8 @@ The package exposes:
   `rsloop.build_info()`
 
 Repository metadata currently targets Python `>=3.10`.
+The native runtime requires Linux 6.1+, macOS 13+, or Windows 11+ so its hot
+paths can rely on modern completion, timer, and scheduler primitives.
 
 ## Documentation
 

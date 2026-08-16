@@ -2,6 +2,109 @@
 use crate::blocking::DefaultBlockingThreadPool;
 use crate::{blocking::BlockingThreadPool, driver::AnyDriver};
 
+#[cfg(target_os = "linux")]
+fn ensure_rsloop_platform() -> Result<(), std::io::Error> {
+    use std::ffi::CStr;
+
+    let mut info = std::mem::MaybeUninit::<libc::utsname>::zeroed();
+    if unsafe { libc::uname(info.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let info = unsafe { info.assume_init() };
+    let release = unsafe { CStr::from_ptr(info.release.as_ptr()) }.to_string_lossy();
+    let mut parts = release
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    let version = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if version < (6, 1) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("rsloop requires Linux 6.1 or newer; detected {release}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_rsloop_platform() -> Result<(), std::io::Error> {
+    use std::ffi::CStr;
+
+    let name = c"kern.osproductversion";
+    let mut buffer = [0_i8; 64];
+    let mut length = buffer.len();
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buffer.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let release = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy();
+    let major = release
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(0);
+    if major < 13 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("rsloop requires macOS 13 or newer; detected {release}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn ensure_rsloop_platform() -> Result<(), std::io::Error> {
+    #[allow(non_snake_case)]
+    #[repr(C)]
+    struct OsVersionInfo {
+        dwOSVersionInfoSize: u32,
+        dwMajorVersion: u32,
+        dwMinorVersion: u32,
+        dwBuildNumber: u32,
+        dwPlatformId: u32,
+        szCSDVersion: [u16; 128],
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetVersion(info: *mut OsVersionInfo) -> i32;
+    }
+
+    let mut info: OsVersionInfo = unsafe { std::mem::zeroed() };
+    info.dwOSVersionInfoSize = std::mem::size_of::<OsVersionInfo>() as u32;
+    let status = unsafe { RtlGetVersion(&mut info) };
+    if status < 0 {
+        return Err(std::io::Error::other(format!(
+            "RtlGetVersion failed with NTSTATUS {status:#x}"
+        )));
+    }
+    if info.dwMajorVersion < 10 || (info.dwMajorVersion == 10 && info.dwBuildNumber < 22_000) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "rsloop requires Windows 11 or newer; detected {}.{}.{}",
+                info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn ensure_rsloop_platform() -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "the rsloop runtime profile supports Linux, macOS, and Windows only",
+    ))
+}
+
 /// I/O driver selection for the async runtime.
 ///
 /// This enum allows choosing which I/O driver to use when building the runtime.
@@ -59,6 +162,7 @@ pub struct RuntimeBuilder {
     enable_timer: bool,
     enable_fs_offload: bool,
     blocking_pool: Option<Box<dyn BlockingThreadPool>>,
+    rsloop_profile: bool,
 }
 
 impl RuntimeBuilder {
@@ -71,7 +175,20 @@ impl RuntimeBuilder {
             enable_timer: false,
             enable_fs_offload: false,
             blocking_pool: None,
+            rsloop_profile: false,
         }
+    }
+
+    /// Selects the scheduler profile used by rsloop.
+    ///
+    /// The profile keeps bounded task batches and polls timers during long
+    /// batches so Python callbacks, kernel completions, and deadlines cannot
+    /// starve one another. It is intentionally an explicit opt-in because the
+    /// vendored crate is also built by its own tests and examples.
+    #[inline]
+    pub fn rsloop_profile(mut self) -> Self {
+        self.rsloop_profile = true;
+        self
     }
 
     /// Sets the I/O driver for the runtime.
@@ -115,6 +232,9 @@ impl RuntimeBuilder {
     ///
     /// If no driver was explicitly set, selects the best available driver for the platform.
     pub fn build(self) -> Result<crate::executor::Runtime, std::io::Error> {
+        if self.rsloop_profile {
+            ensure_rsloop_platform()?;
+        }
         let driver = if let Some(driver_kind) = self.driver_kind {
             driver_kind.into_driver()?
         } else {
@@ -125,6 +245,7 @@ impl RuntimeBuilder {
             self.enable_timer,
             self.blocking_pool,
             self.enable_fs_offload,
+            self.rsloop_profile,
         ))
     }
 }

@@ -7,7 +7,9 @@ use pyo3::types::PyDict;
 const REACTOR: &str = "iocp";
 #[cfg(target_os = "linux")]
 const REACTOR: &str = "io_uring";
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+const REACTOR: &str = "kqueue";
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 const REACTOR: &str = "mio";
 
 /// Return stable diagnostics that help identify the installed native build.
@@ -27,6 +29,19 @@ pub(crate) fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
     info.set_item("target_arch", std::env::consts::ARCH)?;
     info.set_item("free_threaded", cfg!(Py_GIL_DISABLED))?;
     info.set_item("reactor", REACTOR)?;
+    info.set_item("runtime_profile", "rsloop")?;
+    info.set_item(
+        "minimum_os",
+        if cfg!(target_os = "linux") {
+            "Linux 6.1"
+        } else if cfg!(target_os = "macos") {
+            "macOS 13"
+        } else if cfg!(windows) {
+            "Windows 11"
+        } else {
+            "unsupported"
+        },
+    )?;
     info.set_item("tls_backend", "rustls")?;
     info.set_item("profiler", cfg!(feature = "profiler"))?;
     Ok(info.unbind())

@@ -3769,6 +3769,55 @@ pub(crate) async fn run_server_accept_task(server: Arc<ServerCore>, listener: Se
 }
 
 async fn run_tcp_accept_task(server: Arc<ServerCore>, listener: StdTcpListener) {
+    #[cfg(windows)]
+    {
+        run_windows_tcp_accept_pool(server, listener).await;
+        return;
+    }
+
+    #[cfg(not(windows))]
+    run_tcp_accept_lane(server, listener).await;
+}
+
+#[cfg(windows)]
+struct WindowsAcceptPool(Vec<vibeio::JoinHandle<()>>);
+
+#[cfg(windows)]
+impl Drop for WindowsAcceptPool {
+    fn drop(&mut self) {
+        for lane in self.0.drain(..) {
+            lane.cancel();
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn run_windows_tcp_accept_pool(server: Arc<ServerCore>, listener: StdTcpListener) {
+    let lane_count = std::thread::available_parallelism()
+        .map_or(4, usize::from)
+        .saturating_mul(2)
+        .clamp(4, 32);
+    let mut listeners = Vec::with_capacity(lane_count);
+    listeners.push(listener);
+    for _ in 1..lane_count {
+        match listeners[0].try_clone() {
+            Ok(listener) => listeners.push(listener),
+            Err(err) => {
+                report_server_io_error(&server, err, "failed to prepare TCP accept pool");
+                break;
+            }
+        }
+    }
+
+    let lanes = listeners
+        .into_iter()
+        .map(|listener| vibeio::spawn(run_tcp_accept_lane(Arc::clone(&server), listener)))
+        .collect();
+    let _pool = WindowsAcceptPool(lanes);
+    std::future::pending::<()>().await;
+}
+
+async fn run_tcp_accept_lane(server: Arc<ServerCore>, listener: StdTcpListener) {
     profiling::scope!("stream.run_tcp_accept_task");
     let listener = match VibeTcpListener::from_std(listener) {
         Ok(listener) => listener,

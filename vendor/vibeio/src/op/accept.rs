@@ -21,6 +21,7 @@ use windows_sys::Win32::{
     System::IO::OVERLAPPED,
 };
 
+#[cfg(not(target_os = "linux"))]
 use crate::driver::CompletionIoResult;
 use crate::fd_inner::{InnerRawHandle, RawOsHandle};
 use crate::op::Op;
@@ -427,6 +428,14 @@ impl Op for AcceptOp<'_> {
         cx: &mut Context<'_>,
         driver: &AnyDriver,
     ) -> Poll<io::Result<Self::Output>> {
+        #[cfg(target_os = "linux")]
+        let result = match driver.poll_multishot_accept(self.handle, cx) {
+            Poll::Ready(Ok(result)) => result,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => return Poll::Pending,
+        };
+
+        #[cfg(not(target_os = "linux"))]
         let result = if let Some(completion_token) = self.completion_token {
             // Get the completion result
             match driver.get_completion_result(completion_token) {

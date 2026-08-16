@@ -6,7 +6,8 @@ A high-performance, cross-platform asynchronous runtime for Rust.
 
 - **Linux** - uses `io_uring` for true asynchronous I/O.
 - **Windows** - uses I/O Completion Ports (IOCP) for scalable I/O.
-- **macOS / BSD / Others** - uses `kqueue` or `epoll` via `mio` for event notification.
+- **macOS** - uses a native one-shot `kqueue` reactor.
+- **Other Unix systems** - use `kqueue` or `epoll` through `mio`.
 
 ## Core features
 

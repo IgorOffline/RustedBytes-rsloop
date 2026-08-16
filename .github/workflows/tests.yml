@@ -116,6 +116,7 @@ jobs:
 
           oses = [
               {"os_name": "linux", "runner": "ubuntu-latest"},
+              {"os_name": "macos", "runner": "macos-15"},
               {"os_name": "windows", "runner": "windows-latest"},
           ]
           versions = sys.argv[1:]

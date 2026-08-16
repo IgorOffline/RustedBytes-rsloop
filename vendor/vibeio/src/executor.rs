@@ -44,7 +44,7 @@ use crate::blocking::{BlockingThreadPool, SpawnBlockingError};
 use crate::driver::{AnyDriver, AnyInterruptor};
 #[cfg(feature = "process")]
 use crate::process::{start_zombie_reaper, ZombieReaperMessage};
-use crate::task::Task;
+use crate::task::{RemoteWakeContext, Task};
 #[cfg(feature = "time")]
 use crate::timer::Timer;
 
@@ -427,11 +427,11 @@ pub(crate) fn offload_fs() -> bool {
 pub(crate) struct RuntimeInner {
     queue: Rc<UnsafeCell<VecDeque<Arc<Task>>>>,
     next_task: Rc<RefCell<Option<Arc<Task>>>>,
-    remote_queue: Arc<SegQueue<usize>>,
+    remote_wake: Arc<RemoteWakeContext>,
     token_to_task: RefCell<Slab<Arc<Task>>>,
     driver: Rc<AnyDriver>,
-    waiting: Arc<AtomicBool>,
-    interrupt_pending: Arc<AtomicBool>,
+    task_batch_size: usize,
+    timer_poll_threshold: usize,
     blocking_pool: Option<Box<dyn BlockingThreadPool>>,
     #[cfg(feature = "fs")]
     fs_offload: bool,
@@ -484,12 +484,9 @@ impl RuntimeInner {
             future: RefCell::new(Some(future)),
             queue: Rc::downgrade(&self.queue),
             next_task: Rc::downgrade(&self.next_task),
-            remote_queue: Arc::downgrade(&self.remote_queue),
+            remote_wake: Arc::downgrade(&self.remote_wake),
             queued: AtomicBool::new(true),
             thread_id: std::thread::current().id(),
-            interruptor: self.driver.get_interruptor(),
-            waiting: Arc::downgrade(&self.waiting),
-            interrupt_pending: Arc::downgrade(&self.interrupt_pending),
             token: vacant_slab_entry.key(),
         });
         state.borrow_mut().task = Arc::downgrade(&task);
@@ -529,7 +526,7 @@ impl RuntimeInner {
         if budget != 0 {
             let slab = self.token_to_task.borrow();
             while budget != 0 {
-                let Some(token) = self.remote_queue.pop() else {
+                let Some(token) = self.remote_wake.queue.pop() else {
                     break;
                 };
                 if let Some(task) = slab.get(token) {
@@ -555,13 +552,15 @@ impl RuntimeInner {
 
     #[inline]
     fn stop_waiting(&self) {
-        self.waiting.store(false, Ordering::Release);
-        self.interrupt_pending.store(false, Ordering::Release);
+        self.remote_wake.waiting.store(false, Ordering::Release);
+        self.remote_wake
+            .interrupt_pending
+            .store(false, Ordering::Release);
     }
 
     #[inline]
     fn should_skip_wait(&self) -> bool {
-        if self.next_task.borrow().is_some() || !self.remote_queue.is_empty() {
+        if self.next_task.borrow().is_some() || !self.remote_wake.queue.is_empty() {
             return true;
         }
 
@@ -592,7 +591,7 @@ impl Runtime {
         #[cfg(feature = "blocking-default")]
         let blocking_pool: Option<Box<dyn BlockingThreadPool>> =
             Some(Box::new(DefaultBlockingThreadPool::new()));
-        Self::with_options(driver, true, blocking_pool, true)
+        Self::with_options(driver, true, blocking_pool, true, false)
     }
 
     /// Create a new runtime with the given driver and options.
@@ -602,22 +601,37 @@ impl Runtime {
         enable_timer: bool,
         blocking_pool: Option<Box<dyn BlockingThreadPool>>,
         fs_offload: bool,
+        rsloop_profile: bool,
     ) -> Self {
         #[cfg(not(feature = "time"))]
         let _ = enable_timer;
         #[cfg(not(feature = "fs"))]
         let _ = fs_offload;
 
-        let ready_queue = Rc::new(UnsafeCell::new(VecDeque::with_capacity(4096)));
+        let (task_batch_size, timer_poll_threshold, ready_queue_capacity) = if rsloop_profile {
+            (256, 64, 4096)
+        } else {
+            (256, 64, 256)
+        };
+        let ready_queue = Rc::new(UnsafeCell::new(VecDeque::with_capacity(
+            ready_queue_capacity,
+        )));
+        let driver = Rc::new(driver);
+        let remote_wake = Arc::new(RemoteWakeContext {
+            queue: Arc::new(SegQueue::new()),
+            interruptor: driver.get_interruptor(),
+            waiting: Arc::new(AtomicBool::new(false)),
+            interrupt_pending: Arc::new(AtomicBool::new(false)),
+        });
         Runtime {
             inner: Some(Rc::new(RuntimeInner {
                 queue: ready_queue,
                 next_task: Rc::new(RefCell::new(None)),
-                remote_queue: Arc::new(SegQueue::new()),
+                remote_wake,
                 token_to_task: RefCell::new(Slab::with_capacity(4096)),
-                driver: Rc::new(driver),
-                waiting: Arc::new(AtomicBool::new(false)),
-                interrupt_pending: Arc::new(AtomicBool::new(false)),
+                driver,
+                task_batch_size,
+                timer_poll_threshold,
                 blocking_pool,
                 #[cfg(feature = "fs")]
                 fs_offload,
@@ -673,11 +687,11 @@ impl Runtime {
         let mut future = std::pin::pin!(future);
         let root_notify = BlockOnNotify::new(
             inner.driver.get_interruptor(),
-            inner.waiting.clone(),
-            inner.interrupt_pending.clone(),
+            Arc::clone(&inner.remote_wake.waiting),
+            Arc::clone(&inner.remote_wake.interrupt_pending),
         );
         let root_waker = root_notify.waker();
-        let mut batch = Vec::with_capacity(256);
+        let mut batch = Vec::with_capacity(inner.task_batch_size);
 
         loop {
             if root_notify.take_ready() {
@@ -687,14 +701,11 @@ impl Runtime {
                 }
             }
 
-            let mut next_task_taken = false;
-
             batch.clear();
 
-            let mut budget = 256;
+            let mut budget = inner.task_batch_size;
             if let Some(next_task) = inner.take_next_task() {
                 batch.push(next_task);
-                next_task_taken = true;
                 budget -= 1;
             }
             // Always drain to fill the rest of the batch
@@ -707,8 +718,11 @@ impl Runtime {
                     continue;
                 }
 
-                inner.interrupt_pending.store(false, Ordering::Release);
-                inner.waiting.store(true, Ordering::Release);
+                inner
+                    .remote_wake
+                    .interrupt_pending
+                    .store(false, Ordering::Release);
+                inner.remote_wake.waiting.store(true, Ordering::Release);
 
                 if root_notify.is_ready() || inner.should_skip_wait() {
                     inner.stop_waiting();
@@ -754,7 +768,7 @@ impl Runtime {
             }
 
             #[cfg(feature = "time")]
-            if batch.len() > 64 {
+            if batch.len() > inner.timer_poll_threshold {
                 if let Some(timer) = inner.timer.as_ref() {
                     // Spin the timing wheel to avoid starving timers
                     let _ = timer.spin_and_get_deadline();
@@ -790,7 +804,10 @@ impl Runtime {
                 }
             }
 
-            if !next_task_taken && inner.driver.should_flush() {
+            // Completion submissions must reach the kernel even when a task
+            // continually wakes itself into the single-task fast slot. The old
+            // `next_task_taken` guard could postpone io_uring SQEs indefinitely.
+            if inner.driver.should_flush() {
                 inner.driver.flush();
             }
         }

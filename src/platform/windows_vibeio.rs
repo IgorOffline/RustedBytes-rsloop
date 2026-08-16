@@ -116,7 +116,7 @@ fn spawn_service_thread(
 fn build_service_runtime(
     ready_tx: &std::sync::mpsc::SyncSender<Result<(), String>>,
 ) -> Result<vibeio::Runtime, ()> {
-    match vibeio::RuntimeBuilder::new().build() {
+    match vibeio::RuntimeBuilder::new().rsloop_profile().build() {
         Ok(runtime) => Ok(runtime),
         Err(err) => {
             let _ = ready_tx.send(Err(err.to_string()));

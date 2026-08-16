@@ -17,9 +17,6 @@ use std::os::fd::FromRawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 
-#[cfg(windows)]
-use crate::fd_inner::RawOsHandle;
-
 use crate::fs::file::File;
 
 /// Options and flags for opening files.

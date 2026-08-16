@@ -195,6 +195,14 @@ impl Driver for MioDriver {
     }
 
     #[inline]
+    fn should_flush(&self) -> bool {
+        // Registration and re-registration are applied synchronously. Polling
+        // with a zero timeout after every task batch only duplicates the wait
+        // the executor performs as soon as its ready queue becomes empty.
+        false
+    }
+
+    #[inline]
     fn wait(&self, timeout: Option<Duration>) {
         self.wait_timeout(timeout);
     }

@@ -484,6 +484,7 @@ impl LoopCore {
                 .or_insert_with(|| {
                     std::mem::ManuallyDrop::new(
                         vibeio::RuntimeBuilder::new()
+                            .rsloop_profile()
                             .enable_timer(true)
                             .build()
                             .expect("failed to initialize loop-thread vibeio runtime"),

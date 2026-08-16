@@ -147,3 +147,29 @@ Treat this matrix as a regression and trade-off tool, not a single leaderboard.
 Compare throughput together with tail latency and memory, and tune concurrency,
 payload sizes, application work, and connection counts to match the target
 deployment.
+
+## Regression gate and runtime microbenchmarks
+
+Save comparable before/after runs, then enforce the default budgets of 3%
+throughput, 5% p95/p99 latency, and 5% peak RSS:
+
+```bash
+uv run python benchmarks/check_regression.py \
+  benchmarks/results/baseline.json benchmarks/results/candidate.json
+```
+
+Add `--require-improvement 10` when validating an optimization that is expected
+to improve at least one workload by 10%. The checker accepts JSON from either
+benchmark runner and only compares matching `rsloop` measurements.
+
+The vendored executor also has a release-mode microbenchmark for task dispatch
+and timer fanout:
+
+```bash
+cargo bench --manifest-path vendor/vibeio/Cargo.toml --bench runtime
+```
+
+For kernel-level profiling, pair the same release workloads with `perf stat` and
+`perf record` on Linux, Instruments on macOS, or Windows Performance Recorder.
+Track context switches, syscalls, scheduler wakeups, CPU cycles, and allocation
+or peak-RSS changes alongside throughput and tail latency.

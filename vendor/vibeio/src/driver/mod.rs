@@ -1,5 +1,7 @@
 #[cfg(windows)]
 mod iocp;
+#[cfg(target_vendor = "apple")]
+mod kqueue;
 #[cfg(unix)]
 mod mio;
 mod mock;
@@ -7,12 +9,16 @@ mod mock;
 mod uring;
 
 use std::task::Waker;
+#[cfg(target_os = "linux")]
+use std::task::{Context, Poll};
 use std::{io, time::Duration};
 
 use ::mio::{Interest, Token};
 
 #[cfg(windows)]
 use crate::driver::iocp::{IocpDriver, IocpInterruptor};
+#[cfg(target_vendor = "apple")]
+use crate::driver::kqueue::{KqueueDriver, KqueueInterruptor};
 #[cfg(unix)]
 use crate::driver::mio::{MioDriver, MioInterruptor};
 use crate::driver::mock::MockInterruptor;
@@ -63,6 +69,8 @@ pub enum AnyInterruptor {
     Iocp(IocpInterruptor),
     #[cfg(unix)]
     Mio(MioInterruptor),
+    #[cfg(target_vendor = "apple")]
+    Kqueue(KqueueInterruptor),
     #[cfg(target_os = "linux")]
     IoUring(UringInterruptor),
 }
@@ -75,6 +83,8 @@ impl AnyInterruptor {
             AnyInterruptor::Iocp(interruptor) => interruptor.interrupt(),
             #[cfg(unix)]
             AnyInterruptor::Mio(interruptor) => interruptor.interrupt(),
+            #[cfg(target_vendor = "apple")]
+            AnyInterruptor::Kqueue(interruptor) => interruptor.interrupt(),
             #[cfg(target_os = "linux")]
             AnyInterruptor::IoUring(interruptor) => interruptor.interrupt(),
         }
@@ -156,6 +166,20 @@ pub trait Driver {
         None
     }
 
+    /// Polls a Linux multishot accept stream.
+    #[cfg(target_os = "linux")]
+    #[inline]
+    fn poll_multishot_accept(
+        &self,
+        _handle: &InnerRawHandle,
+        _cx: &mut Context<'_>,
+    ) -> Poll<io::Result<i32>> {
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "driver does not support multishot accept",
+        )))
+    }
+
     /// Sets the waker for a completion-based I/O operation.
     #[inline]
     fn set_completion_waker(&self, _token: usize, _waker: Waker) {}
@@ -188,6 +212,8 @@ pub enum AnyDriver {
     Iocp(IocpDriver),
     #[cfg(unix)]
     Mio(MioDriver),
+    #[cfg(target_vendor = "apple")]
+    Kqueue(KqueueDriver),
     #[cfg(target_os = "linux")]
     IoUring(UringDriver),
 }
@@ -197,6 +223,12 @@ impl AnyDriver {
     #[inline]
     pub(crate) fn new_mio() -> Result<Self, std::io::Error> {
         Ok(AnyDriver::Mio(MioDriver::new()?))
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[inline]
+    pub(crate) fn new_kqueue() -> Result<Self, io::Error> {
+        Ok(AnyDriver::Kqueue(KqueueDriver::new()?))
     }
 
     #[inline]
@@ -224,28 +256,30 @@ impl AnyDriver {
             .setup_single_issuer()
             .setup_coop_taskrun()
             .setup_taskrun_flag()
+            .setup_defer_taskrun()
             .setup_submit_all();
-        if let Ok(driver) = Self::new_uring_custom(builder) {
-            return Ok(driver);
-        }
-
-        // Fallback for older kernels
-        Self::new_uring_custom(io_uring::IoUring::builder())
+        Self::new_uring_custom(builder)
     }
 
     #[inline]
     pub(crate) fn new_best() -> Result<Self, io::Error> {
         #[cfg(target_os = "linux")]
-        if let Ok(driver) = Self::new_uring() {
-            return Ok(driver);
+        {
+            Self::new_uring()
         }
 
-        #[cfg(unix)]
-        let driver = Self::new_mio()?;
+        #[cfg(target_vendor = "apple")]
+        {
+            Self::new_kqueue()
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", target_vendor = "apple"))))]
+        {
+            Self::new_mio()
+        }
         #[cfg(windows)]
-        let driver = Self::new_iocp()?;
-
-        Ok(driver)
+        {
+            Self::new_iocp()
+        }
     }
 
     #[inline]
@@ -255,6 +289,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.flush(),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.flush(),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.flush(),
             AnyDriver::Mock(driver) => driver.flush(),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.flush(),
@@ -268,6 +304,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.should_flush(),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.should_flush(),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.should_flush(),
             AnyDriver::Mock(driver) => driver.should_flush(),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.should_flush(),
@@ -281,6 +319,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.wait(timeout),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.wait(timeout),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.wait(timeout),
             AnyDriver::Mock(driver) => driver.wait(timeout),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.wait(timeout),
@@ -299,6 +339,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.register_handle(handle, interest),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.register_handle(handle, interest),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.register_handle(handle, interest),
             AnyDriver::Mock(driver) => driver.register_handle(handle, interest),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.register_handle(handle, interest),
@@ -317,6 +359,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.register_handle_with_mode(handle, interest, mode),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.register_handle_with_mode(handle, interest, mode),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.register_handle_with_mode(handle, interest, mode),
             AnyDriver::Mock(driver) => driver.register_handle_with_mode(handle, interest, mode),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.register_handle_with_mode(handle, interest, mode),
@@ -334,6 +378,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.reregister_handle(handle, interest),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.reregister_handle(handle, interest),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.reregister_handle(handle, interest),
             AnyDriver::Mock(driver) => driver.reregister_handle(handle, interest),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.reregister_handle(handle, interest),
@@ -347,6 +393,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.deregister_handle(handle),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.deregister_handle(handle),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.deregister_handle(handle),
             AnyDriver::Mock(driver) => driver.deregister_handle(handle),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.deregister_handle(handle),
@@ -360,6 +408,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.supports_completion(),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.supports_completion(),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.supports_completion(),
             AnyDriver::Mock(driver) => driver.supports_completion(),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.supports_completion(),
@@ -376,6 +426,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.submit_completion(op, waker),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.submit_completion(op, waker),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.submit_completion(op, waker),
             AnyDriver::Mock(driver) => driver.submit_completion(op, waker),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.submit_completion(op, waker),
@@ -394,6 +446,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.submit_poll(handle, waker, interest),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.submit_poll(handle, waker, interest),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.submit_poll(handle, waker, interest),
             AnyDriver::Mock(driver) => driver.submit_poll(handle, waker, interest),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.submit_poll(handle, waker, interest),
@@ -407,9 +461,25 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.get_completion_result(token),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.get_completion_result(token),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.get_completion_result(token),
             AnyDriver::Mock(driver) => driver.get_completion_result(token),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.get_completion_result(token),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[inline]
+    pub(crate) fn poll_multishot_accept(
+        &self,
+        handle: &InnerRawHandle,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<i32>> {
+        match self {
+            AnyDriver::IoUring(driver) => driver.poll_multishot_accept(handle, cx),
+            AnyDriver::Mio(driver) => driver.poll_multishot_accept(handle, cx),
+            AnyDriver::Mock(driver) => driver.poll_multishot_accept(handle, cx),
         }
     }
 
@@ -420,6 +490,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.set_completion_waker(token, waker),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.set_completion_waker(token, waker),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.set_completion_waker(token, waker),
             AnyDriver::Mock(driver) => driver.set_completion_waker(token, waker),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.set_completion_waker(token, waker),
@@ -433,6 +505,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => driver.ignore_completion(token, data),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => driver.ignore_completion(token, data),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => driver.ignore_completion(token, data),
             AnyDriver::Mock(driver) => driver.ignore_completion(token, data),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => driver.ignore_completion(token, data),
@@ -460,6 +534,8 @@ impl AnyDriver {
             AnyDriver::Iocp(driver) => AnyInterruptor::Iocp(driver.get_interruptor()),
             #[cfg(unix)]
             AnyDriver::Mio(driver) => AnyInterruptor::Mio(driver.get_interruptor()),
+            #[cfg(target_vendor = "apple")]
+            AnyDriver::Kqueue(driver) => AnyInterruptor::Kqueue(driver.get_interruptor()),
             AnyDriver::Mock(driver) => AnyInterruptor::Mock(driver.get_interruptor()),
             #[cfg(target_os = "linux")]
             AnyDriver::IoUring(driver) => AnyInterruptor::IoUring(driver.get_interruptor()),
@@ -485,6 +561,17 @@ mod tests {
         interruptor.interrupt();
         interruptor.interrupt();
         interruptor.interrupt();
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn test_kqueue_driver_interrupt_basic() {
+        let driver = AnyDriver::new_kqueue().expect("Failed to create KqueueDriver");
+        let interruptor = driver.get_interruptor();
+        interruptor.interrupt();
+        interruptor.interrupt();
+        interruptor.interrupt();
+        driver.wait(Some(std::time::Duration::from_millis(10)));
     }
 
     #[cfg(target_os = "linux")]
@@ -537,6 +624,27 @@ mod tests {
             waker.wake();
         });
 
+        runtime.block_on(poll_fn(move |cx| {
+            if tx.send(cx.waker().clone()).is_ok() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }));
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn test_interrupt_kqueue() {
+        let runtime = crate::executor::Runtime::new(
+            AnyDriver::new_kqueue().expect("Failed to create KqueueDriver"),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let waker: Waker = rx.recv().unwrap();
+            drop(rx);
+            waker.wake();
+        });
         runtime.block_on(poll_fn(move |cx| {
             if tx.send(cx.waker().clone()).is_ok() {
                 Poll::Pending

@@ -24,6 +24,8 @@ Environment:
   RSLOOP_PYTHON_VERSIONS  Space-separated version list to override the defaults
                           (default: 3.10 3.11 3.12 3.13 3.14 3.14t)
   RSLOOP_RUST_TARGET      Rust compilation target to pass to maturin
+  MACOSX_DEPLOYMENT_TARGET
+                          macOS wheel floor (defaults to 13.0 for Apple targets)
 
 Examples:
   scripts/build-wheels.sh
@@ -108,6 +110,10 @@ if [[ -n "$RUST_TARGET" ]]; then
   if [[ "$RUST_TARGET" != "$HOST_RUST_TARGET" ]]; then
     IS_CROSS_COMPILE=1
   fi
+fi
+
+if [[ "$RUST_TARGET" == *-apple-darwin ]]; then
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 fi
 
 if (( INSTALL_PYTHONS )); then

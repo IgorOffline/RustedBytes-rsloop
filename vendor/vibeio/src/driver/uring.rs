@@ -1,13 +1,14 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind};
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc as StdArc;
-use std::task::Waker;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use io_uring::types::{SubmitArgs, Timespec};
-use io_uring::{opcode, squeue, types, IoUring};
+use io_uring::{cqueue, opcode, squeue, types, IoUring};
 use mio::{Interest, Token};
 use slab::Slab;
 
@@ -17,10 +18,11 @@ use crate::{
     fd_inner::InnerRawHandle,
 };
 
-const KEY_KIND_BITS: u64 = 1;
+const KEY_KIND_BITS: u64 = 2;
 const KEY_KIND_MASK: u64 = (1u64 << KEY_KIND_BITS) - 1;
 const POLL_KEY_KIND: u8 = 0;
 const COMPLETION_KEY_KIND: u8 = 1;
+const ACCEPT_KEY_KIND: u8 = 2;
 
 pub struct UringInterruptor {
     eventfd: std::sync::Weak<RawFd>,
@@ -48,10 +50,35 @@ struct PollRegistration {
     poll_mask: u32,
     waiter: Option<Waker>,
     poll_armed: bool,
+    generation: u32,
+}
+
+struct AcceptRegistration {
+    results: VecDeque<i32>,
+    waiter: Option<Waker>,
+    armed: bool,
+}
+
+impl Drop for AcceptRegistration {
+    fn drop(&mut self) {
+        for result in self.results.drain(..) {
+            if result >= 0 {
+                unsafe {
+                    libc::close(result);
+                }
+            }
+        }
+    }
+}
+
+struct CompletionRegistration {
+    fd: RawFd,
+    generation: u32,
+    accept: Option<AcceptRegistration>,
 }
 
 enum HandleRegistration {
-    Completion,
+    Completion(CompletionRegistration),
     Poll(PollRegistration),
 }
 
@@ -64,6 +91,7 @@ struct Completion {
 struct DriverState {
     registrations: Slab<HandleRegistration>,
     completions: Slab<Completion>,
+    next_registration_generation: u32,
 }
 
 pub struct UringDriver {
@@ -72,8 +100,6 @@ pub struct UringDriver {
     interrupt_eventfd: Option<StdArc<RawFd>>,
     interrupt_buffer: RefCell<Box<[u8; 8]>>,
     pending_submissions: AtomicBool,
-    ext_arg: bool,
-    timespec: RefCell<Box<Timespec>>,
 }
 
 impl Drop for UringDriver {
@@ -95,18 +121,23 @@ impl UringDriver {
         }
 
         let ring = builder.build(entries)?;
-        let ext_arg = ring.params().is_feature_ext_arg();
+        if !ring.params().is_feature_ext_arg() {
+            unsafe { libc::close(eventfd) };
+            return Err(io::Error::new(
+                ErrorKind::Unsupported,
+                "rsloop requires Linux 6.1+ with io_uring extended arguments",
+            ));
+        }
         let driver = Self {
             ring: RefCell::new(ring),
             state: RefCell::new(DriverState {
                 registrations: Slab::with_capacity(entries as usize),
                 completions: Slab::with_capacity(entries as usize),
+                next_registration_generation: 0,
             }),
             interrupt_eventfd: Some(StdArc::new(eventfd)),
             interrupt_buffer: RefCell::new(Box::new([0; 8])),
             pending_submissions: AtomicBool::new(false),
-            ext_arg,
-            timespec: RefCell::new(Box::new(Timespec::new())),
         };
 
         driver.submit_interrupt();
@@ -130,13 +161,27 @@ impl UringDriver {
     }
 
     #[inline]
-    fn encode_poll_key(token: Token) -> u64 {
-        ((token.0 as u64) << KEY_KIND_BITS) | POLL_KEY_KIND as u64
+    fn encode_poll_key(token: Token, generation: u32) -> u64 {
+        ((u64::from(generation) & 0x3fff_ffff) << 34)
+            | ((token.0 as u64 & u64::from(u32::MAX)) << KEY_KIND_BITS)
+            | POLL_KEY_KIND as u64
     }
 
     #[inline]
     fn decode_token(key: u64) -> Token {
-        Token((key >> KEY_KIND_BITS) as usize)
+        Token(((key >> KEY_KIND_BITS) & u64::from(u32::MAX)) as usize)
+    }
+
+    #[inline]
+    fn decode_poll_generation(key: u64) -> u32 {
+        (key >> 34) as u32
+    }
+
+    #[inline]
+    fn encode_accept_key(token: Token, generation: u32) -> u64 {
+        ((u64::from(generation) & 0x3fff_ffff) << 34)
+            | ((token.0 as u64 & u64::from(u32::MAX)) << KEY_KIND_BITS)
+            | ACCEPT_KEY_KIND as u64
     }
 
     #[inline]
@@ -186,10 +231,17 @@ impl UringDriver {
     }
 
     #[inline]
-    fn push_poll_add(&self, token: Token, fd: RawFd, poll_mask: u32) -> Result<(), io::Error> {
+    fn push_poll_add(
+        &self,
+        token: Token,
+        generation: u32,
+        fd: RawFd,
+        poll_mask: u32,
+    ) -> Result<(), io::Error> {
         let entry = opcode::PollAdd::new(types::Fd(fd), poll_mask)
+            .multi(true)
             .build()
-            .user_data(Self::encode_poll_key(token));
+            .user_data(Self::encode_poll_key(token, generation));
         self.push_entry(entry)
     }
 
@@ -210,50 +262,9 @@ impl UringDriver {
             if should_submit {
                 let submit_result = if wait_for_one {
                     if let Some(timeout) = timeout {
-                        if self.ext_arg {
-                            // Linux 5.11+
-                            ring.submitter()
-                                .submit_with_args(1, &SubmitArgs::new().timespec(&timeout.into()))
-                        } else {
-                            // Linux 5.4+
-                            let timespec = timeout.into();
-                            let mut ts_box = self.timespec.borrow_mut();
-                            **ts_box = timespec;
-                            let timespec_ptr = &**ts_box as *const Timespec;
-
-                            // We must drop the borrow here so we can call push_entry (which borrows ring, but doesn't borrow timespec).
-                            // BUT push_entry borrows ring. We currently have `ring` borrowed mutably!
-                            // We need to drop `ring` borrow before calling `push_entry`?
-                            // `collect_completions` has `let mut ring = self.ring.borrow_mut();` at the top of this block.
-                            // If we call `self.push_entry`, it tries `self.ring.borrow_mut()`, which panics!
-                            //
-                            // FIX: We cannot call `self.push_entry` while holding `ring` borrow.
-                            // We must push manually using the already borrowed `ring`.
-
-                            // Duplicate logic of push_entry but using existing `ring` ref?
-                            // Or just push directly to `ring.submission()`.
-
-                            let entry = opcode::Timeout::new(timespec_ptr)
-                                .build()
-                                .user_data(u64::MAX - 1);
-
-                            if ring.submission().is_full() {
-                                // We are holding borrow, so we can't call methods that borrow.
-                                // But `ring.submit()` is on `IoUring`.
-                                Self::submitter_call_result(ring.submit())?;
-                            }
-
-                            {
-                                let mut sq = ring.submission();
-                                unsafe {
-                                    sq.push(&entry).map_err(|_| {
-                                        io::Error::other("io_uring submission queue is full")
-                                    })?;
-                                }
-                            }
-
-                            ring.submit_and_wait(1)
-                        }
+                        let timespec = Timespec::from(timeout);
+                        ring.submitter()
+                            .submit_with_args(1, &SubmitArgs::new().timespec(&timespec))
                     } else {
                         ring.submit_and_wait(1)
                     }
@@ -304,18 +315,18 @@ impl UringDriver {
                     // Task interrupted
                     interrupt = true;
                     continue;
-                } else if key == u64::MAX - 1 {
-                    // Timeout (Linux <5.10)
-                    continue;
                 }
 
                 let token = Self::decode_token(key);
                 let key_kind = Self::decode_key_kind(key);
 
                 if key_kind == POLL_KEY_KIND {
+                    let generation = Self::decode_poll_generation(key);
                     let waiter = match state.registrations.get_mut(token.0) {
-                        Some(HandleRegistration::Poll(registration)) => {
-                            registration.poll_armed = false;
+                        Some(HandleRegistration::Poll(registration))
+                            if registration.generation == generation =>
+                        {
+                            registration.poll_armed = cqueue::more(cqe.flags());
                             registration.waiter.take()
                         }
                         _ => None,
@@ -327,6 +338,36 @@ impl UringDriver {
                             overflow_wakers.push(waiter);
                         }
                         fast_count += 1;
+                    }
+                    continue;
+                }
+
+                if key_kind == ACCEPT_KEY_KIND {
+                    let generation = Self::decode_poll_generation(key);
+                    let mut delivered = false;
+                    if let Some(HandleRegistration::Completion(registration)) =
+                        state.registrations.get_mut(token.0)
+                    {
+                        if registration.generation == generation {
+                            if let Some(accept) = registration.accept.as_mut() {
+                                accept.armed = cqueue::more(cqe.flags());
+                                accept.results.push_back(result);
+                                if let Some(waiter) = accept.waiter.take() {
+                                    if fast_count < fast_wakers.len() {
+                                        fast_wakers[fast_count] = Some(waiter);
+                                    } else {
+                                        overflow_wakers.push(waiter);
+                                    }
+                                    fast_count += 1;
+                                }
+                                delivered = true;
+                            }
+                        }
+                    }
+                    if !delivered && result >= 0 {
+                        unsafe {
+                            libc::close(result);
+                        }
                     }
                     continue;
                 }
@@ -447,12 +488,22 @@ impl Driver for UringDriver {
         mode: RegistrationMode,
     ) -> Result<Token, io::Error> {
         let mut state = self.state.borrow_mut();
+        state.next_registration_generation =
+            state.next_registration_generation.wrapping_add(1) & 0x3fff_ffff;
+        if state.next_registration_generation == 0 {
+            state.next_registration_generation = 1;
+        }
+        let generation = state.next_registration_generation;
         let entry = state.registrations.vacant_entry();
         let token = Token(entry.key());
 
         match mode {
             RegistrationMode::Completion => {
-                entry.insert(HandleRegistration::Completion);
+                entry.insert(HandleRegistration::Completion(CompletionRegistration {
+                    fd: handle.handle,
+                    generation,
+                    accept: None,
+                }));
             }
             RegistrationMode::Poll => {
                 entry.insert(HandleRegistration::Poll(PollRegistration {
@@ -460,6 +511,7 @@ impl Driver for UringDriver {
                     poll_mask: Self::interest_to_poll_mask(interest),
                     waiter: None,
                     poll_armed: false,
+                    generation,
                 }));
             }
         }
@@ -475,7 +527,7 @@ impl Driver for UringDriver {
     ) -> Result<(), io::Error> {
         let mut state = self.state.borrow_mut();
         match state.registrations.get_mut(handle.token.0) {
-            Some(HandleRegistration::Completion) => Ok(()),
+            Some(HandleRegistration::Completion(_)) => Ok(()),
             Some(HandleRegistration::Poll(registration)) => {
                 registration.poll_mask = Self::interest_to_poll_mask(interest);
                 Ok(())
@@ -532,7 +584,7 @@ impl Driver for UringDriver {
             let mut state = self.state.borrow_mut();
             let registration = match state.registrations.get_mut(token.0) {
                 Some(HandleRegistration::Poll(registration)) => registration,
-                Some(HandleRegistration::Completion) => {
+                Some(HandleRegistration::Completion(_)) => {
                     return Err(io::Error::new(
                         ErrorKind::Unsupported,
                         format!(
@@ -557,12 +609,12 @@ impl Driver for UringDriver {
                 None
             } else {
                 registration.poll_armed = true;
-                Some((registration.fd, desired_mask))
+                Some((registration.generation, registration.fd, desired_mask))
             }
         };
 
-        if let Some((fd, poll_mask)) = poll_spec {
-            if let Err(submit_err) = self.push_poll_add(token, fd, poll_mask) {
+        if let Some((generation, fd, poll_mask)) = poll_spec {
+            if let Err(submit_err) = self.push_poll_add(token, generation, fd, poll_mask) {
                 let mut state = self.state.borrow_mut();
                 if let Some(HandleRegistration::Poll(registration)) =
                     state.registrations.get_mut(token.0)
@@ -616,6 +668,74 @@ impl Driver for UringDriver {
             state.completions.remove(token);
         }
         completed
+    }
+
+    fn poll_multishot_accept(
+        &self,
+        handle: &InnerRawHandle,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<i32>> {
+        let submission = {
+            let mut state = self.state.borrow_mut();
+            let registration = match state.registrations.get_mut(handle.token.0) {
+                Some(HandleRegistration::Completion(registration)) => registration,
+                Some(HandleRegistration::Poll(_)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        ErrorKind::Unsupported,
+                        "multishot accept requires completion registration",
+                    )))
+                }
+                None => {
+                    return Poll::Ready(Err(io::Error::new(
+                        ErrorKind::NotFound,
+                        format!("I/O token {} is not registered", handle.token.0),
+                    )))
+                }
+            };
+            let accept = registration
+                .accept
+                .get_or_insert_with(|| AcceptRegistration {
+                    results: VecDeque::new(),
+                    waiter: None,
+                    armed: false,
+                });
+            if let Some(result) = accept.results.pop_front() {
+                return if result >= 0 {
+                    Poll::Ready(Ok(result))
+                } else {
+                    Poll::Ready(Err(io::Error::from_raw_os_error(-result)))
+                };
+            }
+            Self::update_waiter(&mut accept.waiter, cx.waker().clone());
+            if accept.armed {
+                None
+            } else {
+                accept.armed = true;
+                Some((registration.fd, registration.generation))
+            }
+        };
+
+        if let Some((fd, generation)) = submission {
+            let entry = opcode::AcceptMulti::new(types::Fd(fd))
+                .flags(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
+                .build()
+                .user_data(Self::encode_accept_key(handle.token, generation));
+            if let Err(err) = self.push_entry(entry) {
+                if let Some(HandleRegistration::Completion(registration)) = self
+                    .state
+                    .borrow_mut()
+                    .registrations
+                    .get_mut(handle.token.0)
+                {
+                    if let Some(accept) = registration.accept.as_mut() {
+                        accept.armed = false;
+                        accept.waiter = None;
+                    }
+                }
+                return Poll::Ready(Err(err));
+            }
+        }
+        Poll::Pending
     }
 
     #[inline]
