@@ -13,4 +13,6 @@ pub use commands::{
 pub use loop_core::LoopCore;
 
 pub(crate) use callbacks::CallbackKind;
-pub(crate) use loop_core::{FdWatch, LoopCoreError, SignalHandlerTemplate};
+#[cfg(unix)]
+pub(crate) use loop_core::SignalHandlerTemplate;
+pub(crate) use loop_core::{FdWatch, LoopCoreError};

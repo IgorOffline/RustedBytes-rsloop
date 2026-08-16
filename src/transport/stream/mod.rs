@@ -11,7 +11,7 @@ use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 #[cfg(windows)]
-use std::os::windows::io::{IntoRawSocket, RawSocket};
+use std::os::windows::io::IntoRawSocket;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -4907,6 +4907,7 @@ fn make_stream_extra(
     Ok(extra)
 }
 
+#[cfg(unix)]
 pub fn remove_unix_socket_if_present(path: &str) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),

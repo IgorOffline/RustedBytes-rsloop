@@ -89,6 +89,7 @@ impl ServerCreateParams {
         }
     }
 
+    #[cfg(unix)]
     pub fn with_cleanup_path(mut self, cleanup_path: Option<PathBuf>) -> Self {
         self.cleanup_path = cleanup_path;
         self
