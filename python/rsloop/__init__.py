@@ -9,6 +9,8 @@ __bootstrap()
 from ._loop_compat import Loop
 from ._loop_compat import __version__
 from ._loop_compat import build_info
+from ._loop_compat import reset_transport_stats
+from ._loop_compat import transport_stats
 from ._profile import profile
 from ._profile import profiler_compiled
 from ._profile import profiler_running
@@ -31,7 +33,9 @@ __all__: tuple[str, ...] = (
     "profiler_compiled",
     "profiler_running",
     "run",
+    "reset_transport_stats",
     "start_profiler",
     "stop_profiler",
+    "transport_stats",
     "uninstall",
 )

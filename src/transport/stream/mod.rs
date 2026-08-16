@@ -13,7 +13,7 @@ use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixS
 #[cfg(windows)]
 use std::os::windows::io::IntoRawSocket;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
@@ -105,6 +105,63 @@ const OWNED_READ_HANDOFF_MIN_BYTES: usize = 1024;
 const READ_BUFFER_POOL_LIMIT: usize = 1;
 const TLS_WORKER_STACK_SIZE: usize = 256 * 1024;
 const DEFAULT_MAX_PENDING_TLS_HANDSHAKES: usize = 256;
+
+static TRANSPORT_READ_EVENTS: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_READ_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_PYTHON_READ_DRAINS: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_STAGED_WRITES: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_DIRECT_WRITE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_POLL_REBINDS: AtomicU64 = AtomicU64::new(0);
+
+fn transport_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RSLOOP_TRANSPORT_STATS")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+    })
+}
+
+#[pyfunction]
+pub fn transport_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let stats = PyDict::new(py);
+    stats.set_item("enabled", transport_stats_enabled())?;
+    stats.set_item("read_events", TRANSPORT_READ_EVENTS.load(Ordering::Relaxed))?;
+    stats.set_item("read_bytes", TRANSPORT_READ_BYTES.load(Ordering::Relaxed))?;
+    stats.set_item(
+        "read_wakeups",
+        TRANSPORT_READ_WAKEUPS.load(Ordering::Relaxed),
+    )?;
+    stats.set_item(
+        "python_read_drains",
+        TRANSPORT_PYTHON_READ_DRAINS.load(Ordering::Relaxed),
+    )?;
+    stats.set_item(
+        "staged_writes",
+        TRANSPORT_STAGED_WRITES.load(Ordering::Relaxed),
+    )?;
+    stats.set_item(
+        "direct_write_attempts",
+        TRANSPORT_DIRECT_WRITE_ATTEMPTS.load(Ordering::Relaxed),
+    )?;
+    stats.set_item(
+        "poll_rebinds",
+        TRANSPORT_POLL_REBINDS.load(Ordering::Relaxed),
+    )?;
+    Ok(stats.unbind())
+}
+
+#[pyfunction]
+pub fn reset_transport_stats() {
+    TRANSPORT_READ_EVENTS.store(0, Ordering::Relaxed);
+    TRANSPORT_READ_BYTES.store(0, Ordering::Relaxed);
+    TRANSPORT_READ_WAKEUPS.store(0, Ordering::Relaxed);
+    TRANSPORT_PYTHON_READ_DRAINS.store(0, Ordering::Relaxed);
+    TRANSPORT_STAGED_WRITES.store(0, Ordering::Relaxed);
+    TRANSPORT_DIRECT_WRITE_ATTEMPTS.store(0, Ordering::Relaxed);
+    TRANSPORT_POLL_REBINDS.store(0, Ordering::Relaxed);
+}
 
 fn max_pending_tls_handshakes() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -498,9 +555,9 @@ pub struct StreamTransportCore {
     pending_direct_write: Mutex<Vec<u8>>,
     direct_write_scheduled: AtomicBool,
     #[cfg(windows)]
-    server_poll_reader_requested: AtomicBool,
+    poll_reader_requested: AtomicBool,
     #[cfg(windows)]
-    server_poll_reader_ready: AtomicBool,
+    poll_reader_ready: AtomicBool,
     lazy_writer: Mutex<Option<LazyWriterConfig>>,
     workers: Mutex<Vec<WorkerThread>>,
     // Signaled whenever `read_paused` clears or the transport starts
@@ -512,8 +569,7 @@ pub struct StreamTransportCore {
     // the per-write hot path avoids a state lock plus hash lookup.
     has_text_encoding: bool,
     server_side: bool,
-    #[cfg(windows)]
-    native_stream_reader: bool,
+    coalesce_small_server_writes: bool,
 }
 
 struct ServerState {
@@ -972,18 +1028,13 @@ impl WorkerThread {
 impl StreamTransportCore {
     #[cfg(windows)]
     #[inline]
-    fn server_poll_reader_requested(&self) -> bool {
-        self.server_side && self.server_poll_reader_requested.load(Ordering::Acquire)
+    fn poll_reader_requested(&self) -> bool {
+        self.poll_reader_requested.load(Ordering::Acquire)
     }
 
     #[cfg(windows)]
-    fn request_server_poll_reader(&self) {
-        if !self.server_side
-            || !self.native_stream_reader
-            || self
-                .server_poll_reader_requested
-                .swap(true, Ordering::AcqRel)
-        {
+    fn request_poll_reader(&self) {
+        if self.poll_reader_requested.swap(true, Ordering::AcqRel) {
             return;
         }
 
@@ -1001,16 +1052,42 @@ impl StreamTransportCore {
     }
 
     #[cfg(windows)]
-    fn mark_server_poll_reader_ready(self: &Arc<Self>) {
-        if !self.server_side {
-            return;
+    fn mark_poll_reader_ready(self: &Arc<Self>, rebound: bool) {
+        if rebound && transport_stats_enabled() {
+            TRANSPORT_POLL_REBINDS.fetch_add(1, Ordering::Relaxed);
         }
-        self.server_poll_reader_ready.store(true, Ordering::Release);
-        if self.direct_write_scheduled.load(Ordering::Acquire) {
+        self.poll_reader_ready.store(true, Ordering::Release);
+        self.state_cv.notify_all();
+        if self.server_side && self.direct_write_scheduled.load(Ordering::Acquire) {
             let _ = self.loop_core.send_command(LoopCommand::Transport(
                 LoopTransportCommand::StreamWrite(Arc::clone(self)),
             ));
         }
+    }
+
+    #[cfg(windows)]
+    fn wait_for_poll_reader(&self) -> io::Result<()> {
+        if self.poll_reader_ready.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut state = self.state.lock().expect("poisoned transport state");
+        while !self.poll_reader_ready.load(Ordering::Acquire) {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out rebinding completion reader for synchronous socket reclaim",
+                ));
+            }
+            let (guard, _) = self
+                .state_cv
+                .wait_timeout(state, deadline.saturating_duration_since(now))
+                .expect("poisoned transport state");
+            state = guard;
+        }
+        Ok(())
     }
 
     fn close_extra_socket_with_py(&self, py: Python<'_>) {
@@ -1100,6 +1177,10 @@ impl StreamTransportCore {
             _ => 0,
         };
         if data_len > 0 {
+            if transport_stats_enabled() {
+                TRANSPORT_READ_EVENTS.fetch_add(1, Ordering::Relaxed);
+                TRANSPORT_READ_BYTES.fetch_add(data_len as u64, Ordering::Relaxed);
+            }
             self.pending_read_bytes
                 .fetch_add(data_len, Ordering::AcqRel);
         }
@@ -1111,15 +1192,19 @@ impl StreamTransportCore {
             self.apply_pending_read_backpressure();
         }
 
-        if !self.read_events_scheduled.swap(true, Ordering::AcqRel)
-            && self
+        if !self.read_events_scheduled.swap(true, Ordering::AcqRel) {
+            if transport_stats_enabled() {
+                TRANSPORT_READ_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+            }
+            if self
                 .loop_core
                 .send_command(LoopCommand::Transport(LoopTransportCommand::StreamRead(
                     Arc::clone(self),
                 )))
                 .is_err()
-        {
-            self.read_events_scheduled.store(false, Ordering::Release);
+            {
+                self.read_events_scheduled.store(false, Ordering::Release);
+            }
         }
     }
 
@@ -1128,6 +1213,9 @@ impl StreamTransportCore {
         py: Python<'_>,
     ) -> PyResult<()> {
         profiling::scope!("StreamTransportCore::drain_pending_read_events_with_py");
+        if transport_stats_enabled() {
+            TRANSPORT_PYTHON_READ_DRAINS.fetch_add(1, Ordering::Relaxed);
+        }
         // Snapshot the reader fast path once per drain instead of re-locking
         // transport state for every data event.
         let fast_path = {
@@ -1911,6 +1999,9 @@ impl StreamTransportCore {
 
     fn try_direct_tasked_write(&self, data: &[u8]) -> io::Result<usize> {
         profiling::scope!("StreamTransportCore::try_direct_tasked_write");
+        if transport_stats_enabled() {
+            TRANSPORT_DIRECT_WRITE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        }
         let Some(writer) = &self.direct_writer else {
             return Err(io::Error::other("not direct-tasked"));
         };
@@ -1986,6 +2077,9 @@ impl StreamTransportCore {
         if data.is_empty() {
             return Ok(());
         }
+        if transport_stats_enabled() {
+            TRANSPORT_STAGED_WRITES.fetch_add(1, Ordering::Relaxed);
+        }
 
         let should_pause = self.record_write_buffer_enqueued(data.len())?;
         self.pending_direct_write
@@ -2013,9 +2107,7 @@ impl StreamTransportCore {
     pub(crate) fn flush_pending_direct_write(self: &Arc<Self>) {
         profiling::scope!("StreamTransportCore::flush_pending_direct_write");
         #[cfg(windows)]
-        if self.server_poll_reader_requested()
-            && !self.server_poll_reader_ready.load(Ordering::Acquire)
-        {
+        if self.poll_reader_requested() && !self.poll_reader_ready.load(Ordering::Acquire) {
             return;
         }
         self.direct_write_scheduled.store(false, Ordering::Release);
@@ -2075,17 +2167,17 @@ impl StreamTransportCore {
         profiling::scope!("StreamTransportCore::try_write_bytes");
         #[cfg(windows)]
         if data.len() >= SERVER_POLL_READER_WRITE_THRESHOLD {
-            self.request_server_poll_reader();
-            if self.server_poll_reader_requested()
-                && !self.server_poll_reader_ready.load(Ordering::Acquire)
-            {
+            if self.server_side {
+                self.request_poll_reader();
+            }
+            if self.poll_reader_requested() && !self.poll_reader_ready.load(Ordering::Acquire) {
                 return self.stage_direct_write(data);
             }
         }
 
         if self.direct_writer.is_some() && !self.write_backpressure_active() {
             if self.direct_write_scheduled.load(Ordering::Acquire)
-                || (self.server_side
+                || (self.coalesce_small_server_writes
                     && data.len() > SMALL_WRITE_COALESCE_MIN_BYTES
                     && data.len() <= SMALL_WRITE_COALESCE_MAX_BYTES)
             {
@@ -2156,6 +2248,13 @@ impl StreamTransportCore {
             .ok_or_else(|| PyRuntimeError::new_err("transport does not expose a socket"))?;
         let fd = fd_ops::dup_raw_fd(socket.bind(py).call_method0("fileno")?.extract()?)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+
+        #[cfg(windows)]
+        if self.runtime_socket_fd().is_some() {
+            self.request_poll_reader();
+            self.wait_for_poll_reader()
+                .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        }
 
         self.detach_underlying_stream(py);
         let _ = self.writer_tx.send(WriterCommand::Stop);
@@ -3092,11 +3191,11 @@ fn new_stream_transport_core(
 ) -> Arc<StreamTransportCore> {
     let has_text_encoding = parts.state.extra.contains_key("text_encoding");
     let server_side = parts.state.server.is_some();
-    #[cfg(windows)]
-    let native_stream_reader = matches!(
-        &parts.state.callbacks.stream_reader_fast_path,
-        Some(StreamReaderFastPath::Native { .. })
-    );
+    let coalesce_small_server_writes = server_side
+        && matches!(
+            &parts.state.callbacks.stream_reader_fast_path,
+            Some(StreamReaderFastPath::Native { .. })
+        );
     let reading = parts.state.reading;
     Arc::new(StreamTransportCore {
         loop_core: parts.loop_core,
@@ -3113,17 +3212,16 @@ fn new_stream_transport_core(
         pending_direct_write: Mutex::new(Vec::new()),
         direct_write_scheduled: AtomicBool::new(false),
         #[cfg(windows)]
-        server_poll_reader_requested: AtomicBool::new(false),
+        poll_reader_requested: AtomicBool::new(false),
         #[cfg(windows)]
-        server_poll_reader_ready: AtomicBool::new(false),
+        poll_reader_ready: AtomicBool::new(false),
         lazy_writer: Mutex::new(lazy_writer),
         workers: Mutex::new(Vec::new()),
         state_cv: Condvar::new(),
         read_state_notify: AsyncEvent::new(),
         has_text_encoding,
         server_side,
-        #[cfg(windows)]
-        native_stream_reader,
+        coalesce_small_server_writes,
     })
 }
 
@@ -4532,33 +4630,16 @@ pub(crate) async fn run_tcp_socket_reader_task(
 ) {
     profiling::scope!("stream.run_tcp_socket_reader_task");
 
-    // Native fast streams start in completion mode for low-latency
-    // request/response traffic. Custom protocols retain readiness mode because
-    // either endpoint may call start_tls(), which reclaims the socket
-    // synchronously.
-    if !core.native_stream_reader {
-        match VibePollTcpStream::from_shared(stream) {
-            Ok(reader) => {
-                run_windows_poll_tcp_reader(
-                    core,
-                    reader,
-                    Vec::with_capacity(STREAM_READ_BUFFER_SIZE),
-                )
-                .await;
-            }
-            Err(err) => core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
-                err.to_string(),
-            ))),
-        }
-        return;
-    }
-
-    // Native fast-stream readers use completion mode. A native server switches
-    // to readiness mode when a large response begins.
+    // All TCP protocols start in completion mode on Windows. Besides avoiding
+    // readiness polling for callback-driven protocols (aiohttp, websockets,
+    // uvicorn), this keeps their hot path aligned with native fast streams.
+    // start_tls and large server writes request a synchronous rebind to poll
+    // mode before they reclaim or heavily write through the shared socket.
     let mut reader = match VibeTcpStream::from_shared(stream, vibeio::RegistrationMode::Completion)
     {
         Ok(reader) => reader,
         Err(err) => {
+            core.mark_poll_reader_ready(false);
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
                 err.to_string(),
             )));
@@ -4578,15 +4659,18 @@ pub(crate) async fn run_tcp_socket_reader_task(
             return;
         }
 
-        if core.server_poll_reader_requested() {
+        if core.poll_reader_requested() {
             match reader.into_poll() {
                 Ok(poll_reader) => {
-                    core.mark_server_poll_reader_ready();
+                    core.mark_poll_reader_ready(true);
                     run_windows_poll_tcp_reader(core, poll_reader, buf).await;
                 }
-                Err(err) => core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(
-                    Some(err.to_string()),
-                )),
+                Err(err) => {
+                    core.mark_poll_reader_ready(false);
+                    core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+                        err.to_string(),
+                    )));
+                }
             }
             return;
         }
@@ -4596,6 +4680,9 @@ pub(crate) async fn run_tcp_socket_reader_task(
         buf = returned_buf;
         match result {
             Ok(0) => {
+                if core.poll_reader_requested() {
+                    core.mark_poll_reader_ready(false);
+                }
                 core.enqueue_pending_read_event(PendingReadEvent::Eof);
                 return;
             }
@@ -4612,16 +4699,16 @@ pub(crate) async fn run_tcp_socket_reader_task(
                 // begin bulk writes while an overlapped receive is outstanding.
                 if saturated || tiny_server_trigger {
                     if core.server_side {
-                        core.server_poll_reader_requested
-                            .store(true, Ordering::Release);
+                        core.poll_reader_requested.store(true, Ordering::Release);
                     }
                     match reader.into_poll() {
                         Ok(poll_reader) => {
-                            core.mark_server_poll_reader_ready();
+                            core.mark_poll_reader_ready(true);
                             core.enqueue_pending_read_event(PendingReadEvent::Data(data));
                             run_windows_poll_tcp_reader(core, poll_reader, buf).await;
                         }
                         Err(err) => {
+                            core.mark_poll_reader_ready(false);
                             core.enqueue_pending_read_event(PendingReadEvent::Data(data));
                             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(
                                 Some(err.to_string()),
@@ -4636,21 +4723,25 @@ pub(crate) async fn run_tcp_socket_reader_task(
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err)
-                if core.server_poll_reader_requested()
+                if core.poll_reader_requested()
                     && err.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) =>
             {
                 match reader.into_poll() {
                     Ok(poll_reader) => {
-                        core.mark_server_poll_reader_ready();
+                        core.mark_poll_reader_ready(true);
                         run_windows_poll_tcp_reader(core, poll_reader, buf).await;
                     }
-                    Err(err) => core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(
-                        Some(err.to_string()),
-                    )),
+                    Err(err) => {
+                        core.mark_poll_reader_ready(false);
+                        core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+                            err.to_string(),
+                        )));
+                    }
                 }
                 return;
             }
             Err(err) => {
+                core.mark_poll_reader_ready(false);
                 core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
                     err.to_string(),
                 )));

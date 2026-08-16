@@ -22,6 +22,8 @@ def check_public_api() -> None:
     assert_type(policy.new_event_loop(), rsloop.Loop)
     assert_type(rsloop.run(result()), int)
     assert_type(rsloop.build_info(), dict[str, str | bool])
+    assert_type(rsloop.transport_stats(), dict[str, int | bool])
+    assert_type(rsloop.reset_transport_stats(), None)
     assert_type(rsloop.profiler_compiled(), bool)
     assert_type(rsloop.profiler_running(), bool)
 

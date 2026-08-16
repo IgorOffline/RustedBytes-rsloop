@@ -12,7 +12,7 @@ use crate::profiler::{profiler_compiled, profiler_running, start_profiler, stop_
 use crate::transport::process::{PyProcessPipeTransport, PyProcessTransport};
 use crate::transport::stream::{
     PyFastStreamReader, PyFastStreamWriter, PyServer, PyStreamTransport, open_connection,
-    start_server,
+    reset_transport_stats, start_server, transport_stats,
 };
 
 pub(crate) fn add_module_contents(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -63,6 +63,8 @@ fn add_profiler_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn add_diagnostic_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(transport_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_transport_stats, m)?)?;
     Ok(())
 }
 

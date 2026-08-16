@@ -55,6 +55,27 @@ async def run_in_thread(func, /, *args):
 
 
 class RunTests(unittest.TestCase):
+    def test_transport_stats_shape_and_reset(self) -> None:
+        rsloop.reset_transport_stats()
+        stats = rsloop.transport_stats()
+        self.assertEqual(
+            set(stats),
+            {
+                "enabled",
+                "read_events",
+                "read_bytes",
+                "read_wakeups",
+                "python_read_drains",
+                "staged_writes",
+                "direct_write_attempts",
+                "poll_rebinds",
+            },
+        )
+        self.assertIsInstance(stats["enabled"], bool)
+        self.assertTrue(
+            all(value == 0 for key, value in stats.items() if key != "enabled")
+        )
+
     def test_build_info_describes_native_extension(self) -> None:
         info = rsloop.build_info()
         expected_reactor = (

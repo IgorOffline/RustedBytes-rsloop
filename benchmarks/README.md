@@ -124,6 +124,10 @@ uv run --with uvloop python benchmarks/workload_matrix.py \
 Use `--json-output benchmarks/results/matrix.json` to retain raw measurements.
 Pass `--measurement-mode cold` to put every warmup and measured run in a fresh
 process when startup cost is the subject of the comparison.
+For performance conclusions, add `--sustained`. It raises short loopback
+workloads to at least two warmups, seven measured runs, and 500 operations per
+connection; the ordinary defaults remain intentionally quick for smoke and CI
+runs.
 TLS uses the test certificates under `tests/fixtures/tls`; regenerate them
 cross-platform when needed with:
 

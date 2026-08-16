@@ -183,6 +183,14 @@ Pipes, subprocesses, and signals:
 Profiling:
 
 - `profile(...)`, `profiler_running()`, `start_profiler()`, `stop_profiler()`
+- opt-in transport counters through `transport_stats()` and
+  `reset_transport_stats()`
+
+Set `RSLOOP_TRANSPORT_STATS=1` before importing rsloop to enable the transport
+counters. They report read completions and bytes, Python-thread read drains,
+wakeups, staged and direct writes, and Windows completion-to-poll rebinds.
+Counters remain disabled by default so diagnostics add only one predictable
+branch to transport hot paths.
 
 ## Fast Streams
 
@@ -215,6 +223,9 @@ The runtime is centered on one `vibeio` runtime per loop:
 - the loop coordination thread is always the central scheduler
 - plain TCP / Unix socket reads and non-TLS accept loops use `vibeio` on that
   thread across supported platforms
+- Windows TCP transports, including custom `asyncio.Protocol` implementations,
+  start in IOCP completion mode and rebind to readiness mode before `start_tls`
+  synchronously reclaims a socket
 - generic `add_reader` / `add_writer` descriptors use cancellable OS-poll
   workers because `vibeio` does not expose arbitrary raw-descriptor registration
 - some transport paths still fall back to helper threads, especially TLS I/O,

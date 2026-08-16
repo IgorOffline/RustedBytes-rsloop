@@ -127,6 +127,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument(
+        "--sustained",
+        action="store_true",
+        help=(
+            "Use at least 2 warmups, 7 measured runs, and 500 operations per "
+            "connection so short loopback workloads expose steady-state behavior."
+        ),
+    )
+    parser.add_argument(
         "--measurement-mode",
         choices=("warm", "cold"),
         default="warm",
@@ -184,6 +192,10 @@ def positive(value: int, name: str) -> None:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.sustained:
+        args.warmups = max(args.warmups, 2)
+        args.repeat = max(args.repeat, 7)
+        args.requests_per_connection = max(args.requests_per_connection, 500)
     if args.warmups < 0:
         raise SystemExit("--warmups must be >= 0")
     positive(args.repeat, "--repeat")

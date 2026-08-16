@@ -11,6 +11,8 @@ import typing as __typing
 from ._loop import PyLoop as Loop
 from ._loop import __version__ as __version__
 from ._loop import build_info as build_info
+from ._loop import reset_transport_stats as reset_transport_stats
+from ._loop import transport_stats as transport_stats
 from ._loop import open_connection as __open_connection
 from ._loop import start_server as __start_server
 
