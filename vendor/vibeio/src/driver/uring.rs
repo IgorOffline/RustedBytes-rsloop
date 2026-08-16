@@ -23,6 +23,36 @@ const KEY_KIND_MASK: u64 = (1u64 << KEY_KIND_BITS) - 1;
 const POLL_KEY_KIND: u8 = 0;
 const COMPLETION_KEY_KIND: u8 = 1;
 const ACCEPT_KEY_KIND: u8 = 2;
+const MEMORY_FALLBACK_ENTRIES: [u32; 2] = [256, 64];
+
+fn build_with_memory_fallback<T>(
+    entries: u32,
+    mut build: impl FnMut(u32) -> io::Result<T>,
+) -> io::Result<(T, u32)> {
+    let mut previous = None;
+    let mut last_memory_error = None;
+
+    for candidate in std::iter::once(entries).chain(
+        MEMORY_FALLBACK_ENTRIES
+            .into_iter()
+            .map(|fallback| entries.min(fallback)),
+    ) {
+        if previous == Some(candidate) {
+            continue;
+        }
+        previous = Some(candidate);
+
+        match build(candidate) {
+            Ok(value) => return Ok((value, candidate)),
+            Err(err) if err.raw_os_error() == Some(libc::ENOMEM) => {
+                last_memory_error = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(last_memory_error.expect("at least one io_uring build was attempted"))
+}
 
 pub struct UringInterruptor {
     eventfd: std::sync::Weak<RawFd>,
@@ -114,25 +144,29 @@ impl Drop for UringDriver {
 impl UringDriver {
     #[inline]
     pub(crate) fn new(entries: u32, builder: io_uring::Builder) -> Result<Self, io::Error> {
-        // Create eventfd for interruption
-        let eventfd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        if eventfd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let ring = builder.build(entries)?;
+        // Ring teardown is deferred by the kernel. Rapid runtime churn can
+        // therefore hit ENOMEM even though earlier rings have been dropped;
+        // smaller queues keep initialization reliable while cleanup catches up.
+        let (ring, ring_entries) =
+            build_with_memory_fallback(entries, |candidate| builder.build(candidate))?;
         if !ring.params().is_feature_ext_arg() {
-            unsafe { libc::close(eventfd) };
             return Err(io::Error::new(
                 ErrorKind::Unsupported,
                 "rsloop requires Linux 6.1+ with io_uring extended arguments",
             ));
         }
+
+        // Create eventfd only after ring initialization succeeds so failed
+        // attempts cannot leak descriptors.
+        let eventfd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        if eventfd < 0 {
+            return Err(io::Error::last_os_error());
+        }
         let driver = Self {
             ring: RefCell::new(ring),
             state: RefCell::new(DriverState {
-                registrations: Slab::with_capacity(entries as usize),
-                completions: Slab::with_capacity(entries as usize),
+                registrations: Slab::with_capacity(ring_entries as usize),
+                completions: Slab::with_capacity(ring_entries as usize),
                 next_registration_generation: 0,
             }),
             interrupt_eventfd: Some(StdArc::new(eventfd)),
@@ -431,6 +465,41 @@ impl UringDriver {
         if let Err(err) = self.push_entry(entry) {
             panic!("io_uring: failed to submit interrupt task: {}", err);
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn retries_smaller_rings_after_out_of_memory() {
+        let mut attempts = Vec::new();
+        let selected = build_with_memory_fallback(1024, |entries| {
+            attempts.push(entries);
+            if entries > 64 {
+                Err(io::Error::from_raw_os_error(libc::ENOMEM))
+            } else {
+                Ok(entries)
+            }
+        })
+        .expect("small ring should initialize");
+
+        assert_eq!(selected, (64, 64));
+        assert_eq!(attempts, [1024, 256, 64]);
+    }
+
+    #[test]
+    fn does_not_retry_non_memory_errors() {
+        let mut attempts = Vec::new();
+        let err = build_with_memory_fallback(1024, |entries| -> io::Result<()> {
+            attempts.push(entries);
+            Err(io::Error::from_raw_os_error(libc::EINVAL))
+        })
+        .expect_err("invalid configuration should be preserved");
+
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+        assert_eq!(attempts, [1024]);
     }
 }
 
