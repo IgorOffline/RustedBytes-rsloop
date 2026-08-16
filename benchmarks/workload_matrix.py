@@ -7,15 +7,16 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import ssl
 import statistics
 import struct
 import subprocess
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from compare_event_loops import (
     LOOP_CHOICES,
@@ -28,11 +29,17 @@ from compare_event_loops import (
     normalize_csv,
 )
 
-
 SCENARIO_CHOICES = (
     "http_keepalive",
     "tls_http",
     "websocket_messages",
+    "websocket_tls",
+    "websockets_messages",
+    "websockets_tls",
+    "aiohttp_websocket_messages",
+    "aiohttp_websocket_tls",
+    "starlette_websocket_messages",
+    "starlette_websocket_tls",
     "mixed_streams",
     "bulk_transfer",
     "idle_connections",
@@ -409,7 +416,7 @@ async def read_websocket_frame(reader: asyncio.StreamReader) -> bytes:
 
 
 async def run_websocket_messages(
-    loop_name: str, args: argparse.Namespace
+    loop_name: str, args: argparse.Namespace, *, use_tls: bool = False
 ) -> MatrixResult:
     async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -428,7 +435,12 @@ async def run_websocket_messages(
         finally:
             await close_writer(writer)
 
-    server = await asyncio.start_server(echo, "127.0.0.1", 0)
+    server_ssl = client_ssl = None
+    if use_tls:
+        server_ssl, client_ssl = tls_contexts(args.tls_dir)
+    server = await asyncio.start_server(
+        echo, "127.0.0.1", 0, ssl=server_ssl
+    )
     host, port = server.sockets[0].getsockname()[:2]
     latencies: list[float] = []
 
@@ -437,7 +449,12 @@ async def run_websocket_messages(
     async def open_client(
         client_id: int,
     ) -> tuple[int, asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_connection(host, port)
+        reader, writer = await asyncio.open_connection(
+            host,
+            port,
+            ssl=client_ssl,
+            server_hostname="localhost" if use_tls else None,
+        )
         connections.append((reader, writer))
         writer.write(WEBSOCKET_REQUEST)
         await writer.drain()
@@ -485,7 +502,184 @@ async def run_websocket_messages(
     finished = time.perf_counter()
     return MatrixResult(
         loop_name,
-        "websocket_messages",
+        "websocket_tls" if use_tls else "websocket_messages",
+        finished - started,
+        args.concurrency * args.requests_per_connection,
+        transferred,
+        latencies,
+        connection_setup_seconds=setup_finished - started,
+        traffic_seconds=traffic_finished - setup_finished,
+        teardown_seconds=finished - traffic_finished,
+    )
+
+
+async def run_library_websocket_messages(
+    loop_name: str,
+    args: argparse.Namespace,
+    *,
+    library: str,
+    use_tls: bool,
+) -> MatrixResult:
+    from websockets.asyncio.client import connect
+
+    server_ssl = client_ssl = None
+    if use_tls:
+        server_ssl, client_ssl = tls_contexts(args.tls_dir)
+
+    if library == "websockets":
+        from websockets.asyncio.server import serve
+
+        async def echo(websocket: object) -> None:
+            async for message in websocket:
+                await websocket.send(message)
+
+        server = await serve(
+            echo,
+            "127.0.0.1",
+            0,
+            ssl=server_ssl,
+            compression=None,
+            ping_interval=None,
+        )
+        host, port = server.sockets[0].getsockname()[:2]
+
+        async def stop_server() -> None:
+            server.close()
+            await server.wait_closed()
+
+    elif library == "aiohttp":
+        from aiohttp import WSMsgType, web
+
+        async def echo(request: object) -> object:
+            websocket = web.WebSocketResponse(compress=False)
+            await websocket.prepare(request)
+            async for message in websocket:
+                if message.type == WSMsgType.BINARY:
+                    await websocket.send_bytes(message.data)
+                elif message.type == WSMsgType.TEXT:
+                    await websocket.send_str(message.data)
+            return websocket
+
+        app = web.Application()
+        app.router.add_get("/socket", echo)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_ssl)
+        await site.start()
+        sockets = site._server.sockets
+        host, port = sockets[0].getsockname()[:2]
+
+        async def stop_server() -> None:
+            await runner.cleanup()
+
+    elif library == "starlette":
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.routing import WebSocketRoute
+        from starlette.websockets import WebSocketDisconnect
+
+        async def echo(websocket: object) -> None:
+            await websocket.accept()
+            try:
+                while True:
+                    await websocket.send_bytes(await websocket.receive_bytes())
+            except WebSocketDisconnect:
+                pass
+
+        app = Starlette(routes=[WebSocketRoute("/socket", echo)])
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2048)
+        listener.setblocking(False)
+        host, port = listener.getsockname()[:2]
+        config = uvicorn.Config(
+            app,
+            loop="none",
+            lifespan="off",
+            ws="websockets",
+            ws_per_message_deflate=False,
+            ws_ping_interval=None,
+            log_config=None,
+            access_log=False,
+            ssl_certfile=str(args.tls_dir / "cert.pem") if use_tls else None,
+            ssl_keyfile=str(args.tls_dir / "key.pem") if use_tls else None,
+        )
+        uvicorn_server = uvicorn.Server(config)
+        server_task = asyncio.create_task(uvicorn_server.serve(sockets=[listener]))
+        while not uvicorn_server.started:
+            if server_task.done():
+                await server_task
+                raise RuntimeError("Starlette ASGI server stopped during startup")
+            await asyncio.sleep(0)
+
+        async def stop_server() -> None:
+            uvicorn_server.should_exit = True
+            await server_task
+            listener.close()
+
+    else:
+        raise ValueError(f"unknown WebSocket library: {library}")
+
+    scheme = "wss" if use_tls else "ws"
+    uri = f"{scheme}://{host}:{port}/socket"
+    connections: list[object] = []
+    latencies: list[float] = []
+
+    async def open_client() -> object:
+        websocket = await connect(
+            uri,
+            ssl=client_ssl,
+            compression=None,
+            ping_interval=None,
+        )
+        connections.append(websocket)
+        return websocket
+
+    async def client(client_id: int, websocket: object) -> int:
+        transferred = 0
+        for index in range(args.requests_per_connection):
+            size = args.websocket_payload_sizes[
+                (client_id + index) % len(args.websocket_payload_sizes)
+            ]
+            payload = bytes([(client_id + index) % 251]) * size
+            started = time.perf_counter()
+            await websocket.send(payload)
+            response = await websocket.recv()
+            if response != payload:
+                raise RuntimeError("WebSocket echo mismatch")
+            latencies.append((time.perf_counter() - started) * 1000)
+            transferred += size * 2
+        return transferred
+
+    started = time.perf_counter()
+    setup_finished = traffic_finished = started
+    try:
+        opened = await asyncio.gather(
+            *(open_client() for _ in range(args.concurrency))
+        )
+        setup_finished = time.perf_counter()
+        transferred = sum(
+            await asyncio.gather(
+                *(client(index, websocket) for index, websocket in enumerate(opened))
+            )
+        )
+        traffic_finished = time.perf_counter()
+    finally:
+        await asyncio.gather(
+            *(websocket.close() for websocket in connections),
+            return_exceptions=True,
+        )
+        await stop_server()
+    finished = time.perf_counter()
+    scenario = f"{library}_{'tls' if use_tls else 'messages'}"
+    if library == "aiohttp":
+        scenario = f"aiohttp_websocket_{'tls' if use_tls else 'messages'}"
+    elif library == "starlette":
+        scenario = f"starlette_websocket_{'tls' if use_tls else 'messages'}"
+    return MatrixResult(
+        loop_name,
+        scenario,
         finished - started,
         args.concurrency * args.requests_per_connection,
         transferred,
@@ -702,6 +896,27 @@ SCENARIO_RUNNERS: dict[
     "http_keepalive": lambda loop, args: run_http(loop, args, use_tls=False),
     "tls_http": lambda loop, args: run_http(loop, args, use_tls=True),
     "websocket_messages": run_websocket_messages,
+    "websocket_tls": lambda loop, args: run_websocket_messages(
+        loop, args, use_tls=True
+    ),
+    "websockets_messages": lambda loop, args: run_library_websocket_messages(
+        loop, args, library="websockets", use_tls=False
+    ),
+    "websockets_tls": lambda loop, args: run_library_websocket_messages(
+        loop, args, library="websockets", use_tls=True
+    ),
+    "aiohttp_websocket_messages": lambda loop, args: run_library_websocket_messages(
+        loop, args, library="aiohttp", use_tls=False
+    ),
+    "aiohttp_websocket_tls": lambda loop, args: run_library_websocket_messages(
+        loop, args, library="aiohttp", use_tls=True
+    ),
+    "starlette_websocket_messages": lambda loop, args: run_library_websocket_messages(
+        loop, args, library="starlette", use_tls=False
+    ),
+    "starlette_websocket_tls": lambda loop, args: run_library_websocket_messages(
+        loop, args, library="starlette", use_tls=True
+    ),
     "mixed_streams": run_mixed_streams,
     "bulk_transfer": run_bulk_transfer,
     "idle_connections": run_idle_connections,
@@ -722,8 +937,10 @@ def run_with_loop(loop_name: str, awaitable: Awaitable[MatrixResult]) -> MatrixR
 
 
 def child_main(args: argparse.Namespace) -> int:
-    if args.scenario == "idle_connections":
-        ensure_idle_connection_capacity(args.idle_connections)
+    connection_count = (
+        args.idle_connections if args.scenario == "idle_connections" else args.concurrency
+    )
+    ensure_idle_connection_capacity(connection_count)
 
     if args.profile_label:
         if args.loop != "rsloop":
@@ -832,6 +1049,7 @@ def run_child_batch(
         capture_output=True,
         text=True,
         check=False,
+        timeout=300,
     )
     if proc.returncode:
         raise RuntimeError(

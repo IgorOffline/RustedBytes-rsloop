@@ -21,6 +21,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawSocket, FromRawSocket, IntoRawSocket, RawSocket};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use mio::Interest;
@@ -224,7 +225,7 @@ fn new_socket(
 /// let read = read?;
 /// ```
 pub struct TcpStream {
-    inner: std::net::TcpStream,
+    inner: Arc<std::net::TcpStream>,
     handle: ManuallyDrop<InnerRawHandle>,
 }
 
@@ -367,6 +368,24 @@ impl TcpStream {
         inner: std::net::TcpStream,
         mode: RegistrationMode,
     ) -> Result<Self, io::Error> {
+        Self::from_shared_with_mode(Arc::new(inner), mode)
+    }
+
+    /// Creates a stream registration that shares ownership of a standard TCP
+    /// stream with another I/O path.
+    #[inline]
+    pub fn from_shared(
+        inner: Arc<std::net::TcpStream>,
+        mode: RegistrationMode,
+    ) -> Result<Self, io::Error> {
+        Self::from_shared_with_mode(inner, mode)
+    }
+
+    #[inline]
+    fn from_shared_with_mode(
+        inner: Arc<std::net::TcpStream>,
+        mode: RegistrationMode,
+    ) -> Result<Self, io::Error> {
         #[cfg(unix)]
         let handle = ManuallyDrop::new(InnerRawHandle::new_with_mode(
             inner.as_raw_fd(),
@@ -439,6 +458,16 @@ impl PollTcpStream {
     pub fn from_std(inner: std::net::TcpStream) -> Result<Self, io::Error> {
         Ok(Self {
             stream: TcpStream::from_std_with_mode(inner, RegistrationMode::Poll)?,
+            write_ready: RefCell::new(false),
+            read_ready: RefCell::new(false),
+        })
+    }
+
+    /// Creates a poll stream that shares ownership of a standard TCP stream.
+    #[inline]
+    pub fn from_shared(inner: Arc<std::net::TcpStream>) -> Result<Self, io::Error> {
+        Ok(Self {
+            stream: TcpStream::from_shared_with_mode(inner, RegistrationMode::Poll)?,
             write_ready: RefCell::new(false),
             read_ready: RefCell::new(false),
         })
@@ -563,7 +592,14 @@ impl IntoRawFd for TcpStream {
         // We then move out the inner std stream and transfer its fd ownership to the caller.
         unsafe {
             ManuallyDrop::drop(&mut this.handle);
-            std::ptr::read(&this.inner).into_raw_fd()
+            let inner = std::ptr::read(&this.inner);
+            match Arc::try_unwrap(inner) {
+                Ok(inner) => inner.into_raw_fd(),
+                Err(inner) => inner
+                    .try_clone()
+                    .expect("failed to duplicate shared TCP stream")
+                    .into_raw_fd(),
+            }
         }
     }
 }
@@ -594,7 +630,14 @@ impl IntoRawSocket for TcpStream {
         // We then move out the inner std stream and transfer its socket ownership to the caller.
         unsafe {
             ManuallyDrop::drop(&mut this.handle);
-            std::ptr::read(&this.inner).into_raw_socket()
+            let inner = std::ptr::read(&this.inner);
+            match Arc::try_unwrap(inner) {
+                Ok(inner) => inner.into_raw_socket(),
+                Err(inner) => inner
+                    .try_clone()
+                    .expect("failed to duplicate shared TCP stream")
+                    .into_raw_socket(),
+            }
         }
     }
 }

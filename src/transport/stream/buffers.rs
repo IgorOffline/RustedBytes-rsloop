@@ -18,8 +18,9 @@ impl PendingReadBuffer {
         &self.0
     }
 
-    pub(super) fn extend(&mut self, data: Vec<u8>) {
+    pub(super) fn extend(&mut self, data: Vec<u8>) -> Vec<u8> {
         self.0.extend_from_slice(&data);
+        data
     }
 }
 

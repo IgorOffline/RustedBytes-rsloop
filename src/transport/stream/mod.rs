@@ -101,7 +101,8 @@ const MAX_STREAM_READ_BUFFER_SIZE: usize = 64 * 1024;
 const SERVER_POLL_READER_WRITE_THRESHOLD: usize = STREAM_READ_BUFFER_SIZE;
 #[cfg(windows)]
 const SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES: usize = 16;
-const OWNED_READ_HANDOFF_MIN_BYTES: usize = STREAM_READ_BUFFER_SIZE / 2;
+const OWNED_READ_HANDOFF_MIN_BYTES: usize = 1024;
+const READ_BUFFER_POOL_LIMIT: usize = 1;
 const TLS_WORKER_STACK_SIZE: usize = 256 * 1024;
 const DEFAULT_MAX_PENDING_TLS_HANDSHAKES: usize = 256;
 
@@ -125,6 +126,49 @@ fn max_write_buffer_size() -> usize {
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_MAX_WRITE_BUFFER_SIZE)
     })
+}
+
+/// Small transport-local pool shared by the runtime reader and Python-loop
+/// delivery path. Framed protocols repeatedly exchange similarly sized
+/// buffers; recycling avoids allocating a fresh Vec after every owned handoff.
+struct ReadBufferPool {
+    buffers: Mutex<Vec<Vec<u8>>>,
+}
+
+impl ReadBufferPool {
+    fn new() -> Self {
+        Self {
+            buffers: Mutex::new(Vec::with_capacity(READ_BUFFER_POOL_LIMIT)),
+        }
+    }
+
+    fn acquire(&self, capacity: usize) -> Vec<u8> {
+        let mut buffer = self
+            .buffers
+            .lock()
+            .expect("poisoned stream read buffer pool")
+            .pop()
+            .unwrap_or_default();
+        buffer.clear();
+        if buffer.capacity() < capacity {
+            buffer.reserve(capacity - buffer.capacity());
+        }
+        buffer
+    }
+
+    fn release(&self, mut buffer: Vec<u8>) {
+        if buffer.capacity() > MAX_STREAM_READ_BUFFER_SIZE {
+            return;
+        }
+        buffer.clear();
+        let mut buffers = self
+            .buffers
+            .lock()
+            .expect("poisoned stream read buffer pool");
+        if buffers.len() < READ_BUFFER_POOL_LIMIT {
+            buffers.push(buffer);
+        }
+    }
 }
 
 // After a successful read on a blocking reader worker, retry non-blocking
@@ -283,10 +327,13 @@ impl StreamReaderFastPath {
         }
     }
 
-    fn feed_owned_data(&self, py: Python<'_>, data: Vec<u8>) -> PyResult<()> {
+    fn feed_owned_data(&self, py: Python<'_>, data: Vec<u8>) -> PyResult<Option<Vec<u8>>> {
         match self {
             Self::Native { reader, .. } => reader.borrow_mut(py).feed_owned_data_internal(py, data),
-            Self::Generic { .. } => self.feed_data(py, &data),
+            Self::Generic { .. } => {
+                self.feed_data(py, &data)?;
+                Ok(Some(data))
+            }
         }
     }
 
@@ -441,12 +488,13 @@ pub struct StreamTransportCore {
     loop_obj: Py<PyAny>,
     state: Mutex<StreamTransportState>,
     pending_read_events: Mutex<VecDeque<PendingReadEvent>>,
+    read_buffer_pool: Arc<ReadBufferPool>,
     pending_read_bytes: AtomicUsize,
     read_events_scheduled: AtomicBool,
     reading: AtomicBool,
     detached: AtomicBool,
     writer_tx: Sender<WriterCommand>,
-    direct_writer: Option<Mutex<TaskedDirectWriter>>,
+    direct_writer: Option<Mutex<Option<TaskedDirectWriter>>>,
     pending_direct_write: Mutex<Vec<u8>>,
     direct_write_scheduled: AtomicBool,
     #[cfg(windows)]
@@ -523,7 +571,7 @@ pub struct PyStreamTransport {
 }
 
 enum TaskedDirectWriter {
-    Tcp(StdTcpStream),
+    Tcp(Arc<StdTcpStream>),
     #[cfg(unix)]
     Unix(StdUnixStream),
 }
@@ -548,7 +596,7 @@ impl TaskedDirectWriter {
 
 pub enum ReaderTarget {
     File(std::fs::File),
-    Tcp(StdTcpStream),
+    Tcp(Arc<StdTcpStream>),
     #[cfg(unix)]
     Unix(StdUnixStream),
 }
@@ -578,7 +626,7 @@ impl Read for ReaderTarget {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::File(file) => file.read(buf),
-            Self::Tcp(stream) => stream.read(buf),
+            Self::Tcp(stream) => stream.as_ref().read(buf),
             #[cfg(unix)]
             Self::Unix(stream) => stream.read(buf),
         }
@@ -1117,15 +1165,19 @@ impl StreamTransportCore {
                         drained_events += 1;
                         drained_bytes += data.len();
                         if let Some(fast_path) = fast_path.as_ref() {
-                            if let Err(err) = fast_path.feed_owned_data(py, data) {
-                                let _ = self.report_error_with_py(
-                                    py,
-                                    err,
-                                    "stream data_received callback failed",
-                                );
-                                let _ = self.connection_lost_with_py(py, None);
-                                self.read_events_scheduled.store(false, Ordering::Release);
-                                return Ok(());
+                            match fast_path.feed_owned_data(py, data) {
+                                Ok(Some(buffer)) => self.read_buffer_pool.release(buffer),
+                                Ok(None) => {}
+                                Err(err) => {
+                                    let _ = self.report_error_with_py(
+                                        py,
+                                        err,
+                                        "stream data_received callback failed",
+                                    );
+                                    let _ = self.connection_lost_with_py(py, None);
+                                    self.read_events_scheduled.store(false, Ordering::Release);
+                                    return Ok(());
+                                }
                             }
                         } else {
                             match &mut pending_data {
@@ -1133,7 +1185,8 @@ impl StreamTransportCore {
                                     if buffer.len() + data.len()
                                         <= MAX_PENDING_READ_COALESCE_BYTES =>
                                 {
-                                    buffer.extend(data);
+                                    let recycled = buffer.extend(data);
+                                    self.read_buffer_pool.release(recycled);
                                 }
                                 Some(_) => {
                                     if let Err(err) = self.flush_pending_data_with_py(
@@ -1360,15 +1413,15 @@ impl StreamTransportCore {
             return Ok(());
         };
 
-        if self.is_closing_or_lost() {
-            return Ok(());
-        }
-
-        if let Some(fast_path) = fast_path {
-            return fast_path.feed_data(py, data.as_slice());
-        }
-
-        self.data_received_slow_path(py, data.as_slice())
+        let result = if self.is_closing_or_lost() {
+            Ok(())
+        } else if let Some(fast_path) = fast_path {
+            fast_path.feed_data(py, data.as_slice())
+        } else {
+            self.data_received_slow_path(py, data.as_slice())
+        };
+        self.read_buffer_pool.release(data.0);
+        result
     }
 
     fn report_error_with_py(&self, py: Python<'_>, err: PyErr, message: &str) -> PyResult<()> {
@@ -1589,7 +1642,12 @@ impl StreamTransportCore {
             self.call_protocol_method1(py, &callback, &context, context_needs_run, arg)?;
         }
 
+        // Preserve asyncio's post-close get_extra_info("socket") behavior
+        // without retaining the live shared owner through Python reference
+        // cycles: cache a proxy first, then close its duplicate descriptor.
+        let _ = self.get_extra(py, "socket");
         self.close_extra_socket_with_py(py);
+        self.release_direct_writer();
 
         if let Some(server) = server.and_then(|weak| weak.upgrade()) {
             server.connection_lost();
@@ -1635,10 +1693,13 @@ impl StreamTransportCore {
         }
 
         let family = lazy_socket_family?;
-        let fd = self
-            .direct_writer
-            .as_ref()
-            .map(|writer| writer.lock().expect("poisoned direct tasked writer").fd())?;
+        let fd = self.direct_writer.as_ref().and_then(|writer| {
+            writer
+                .lock()
+                .expect("poisoned direct tasked writer")
+                .as_ref()
+                .map(TaskedDirectWriter::fd)
+        })?;
         let extra = make_stream_extra(py, fd, family).ok()?;
         if transport_closed && let Some(socket) = extra.get("socket") {
             let _ = socket.bind(py).call_method0("close");
@@ -1676,6 +1737,12 @@ impl StreamTransportCore {
         self.reading.store(false, Ordering::Release);
         self.state_cv.notify_all();
         self.read_state_notify.notify_all();
+    }
+
+    fn release_direct_writer(&self) {
+        if let Some(writer) = &self.direct_writer {
+            writer.lock().expect("poisoned direct tasked writer").take();
+        }
     }
 
     fn is_closing_or_lost(&self) -> bool {
@@ -1848,7 +1915,13 @@ impl StreamTransportCore {
             return Err(io::Error::other("not direct-tasked"));
         };
         let mut writer = writer.lock().expect("poisoned direct tasked writer");
-        match writer.deref_mut() {
+        let Some(writer) = writer.as_mut() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "direct writer is closed",
+            ));
+        };
+        match writer {
             TaskedDirectWriter::Tcp(stream) => {
                 #[cfg(windows)]
                 // A paused reader does not consume Winsock's asynchronous reset
@@ -1860,7 +1933,7 @@ impl StreamTransportCore {
                     return Err(err);
                 }
 
-                stream.write(data)
+                stream.as_ref().write(data)
             }
             #[cfg(unix)]
             TaskedDirectWriter::Unix(stream) => stream.write(data),
@@ -2090,6 +2163,7 @@ impl StreamTransportCore {
             stop_socket_reader(self, fd).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
         }
         self.abort_workers();
+        self.release_direct_writer();
 
         #[allow(unused_variables)]
         let family = socket.bind(py).getattr("family")?.extract::<i32>()?;
@@ -2484,9 +2558,36 @@ impl PyStreamTransport {
     }
 
     fn writelines(&self, py: Python<'_>, seq: &Bound<'_, PyAny>) -> PyResult<()> {
-        for item in seq.try_iter()? {
-            self.write_data(py, &item?)?;
+        if self.core.has_text_encoding {
+            for item in seq.try_iter()? {
+                self.write_data(py, &item?)?;
+            }
+            return Ok(());
         }
+        if self.core.is_closing() {
+            return Ok(());
+        }
+        if !self.core.is_writable() {
+            return Err(PyRuntimeError::new_err("transport is not writable"));
+        }
+
+        // Match asyncio's single-write writelines behavior. Besides reducing
+        // syscalls for framed protocols, validating and joining here lets the
+        // direct path account for backpressure once for the complete batch.
+        let bytes_type = py.import("builtins")?.getattr("bytes")?;
+        let mut joined = Vec::new();
+        for item in seq.try_iter()? {
+            let item = item?;
+            if let Ok(bytes) = item.cast::<PyBytes>() {
+                joined.extend_from_slice(bytes.as_bytes());
+            } else {
+                let converted = bytes_type.call1((item,))?;
+                joined.extend_from_slice(converted.cast::<PyBytes>()?.as_bytes());
+            }
+        }
+        self.core
+            .try_write_bytes(&joined)
+            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
         Ok(())
     }
 
@@ -2494,7 +2595,7 @@ impl PyStreamTransport {
         self.core.flush_pending_direct_write();
         self.core.set_closing();
         if let Some(fd) = self.core.runtime_socket_fd() {
-            let _ = stop_socket_reader(&self.core, fd);
+            let _ = stop_socket_reader_nowait(&self.core, fd);
         }
         if self.core.direct_writer.is_none() {
             let _ = self.core.writer_tx.send(WriterCommand::Close);
@@ -2503,7 +2604,9 @@ impl PyStreamTransport {
         if !self.core.write_backpressure_active() {
             if let Some(writer) = &self.core.direct_writer {
                 let writer = writer.lock().expect("poisoned direct tasked writer");
-                let _ = writer.shutdown_close();
+                if let Some(writer) = writer.as_ref() {
+                    let _ = writer.shutdown_close();
+                }
             }
             let _ = self.core.writer_tx.send(WriterCommand::Stop);
             let _ = self.core.connection_lost(None);
@@ -2518,7 +2621,7 @@ impl PyStreamTransport {
         self.core.discard_pending_direct_write();
         self.core.set_closing();
         if let Some(fd) = self.core.runtime_socket_fd() {
-            let _ = stop_socket_reader(&self.core, fd);
+            let _ = stop_socket_reader_nowait(&self.core, fd);
         }
         if self.core.direct_writer.is_none() {
             let _ = self.core.writer_tx.send(WriterCommand::Abort);
@@ -2526,7 +2629,9 @@ impl PyStreamTransport {
         }
         if let Some(writer) = &self.core.direct_writer {
             let writer = writer.lock().expect("poisoned direct tasked writer");
-            let _ = writer.shutdown_close();
+            if let Some(writer) = writer.as_ref() {
+                let _ = writer.shutdown_close();
+            }
         }
         let _ = self.core.writer_tx.send(WriterCommand::Abort);
         let _ = self.core.connection_lost(None);
@@ -2552,14 +2657,15 @@ impl PyStreamTransport {
         if self.core.direct_writer.is_some() && !self.core.write_backpressure_active() {
             if let Some(writer) = &self.core.direct_writer {
                 let writer = writer.lock().expect("poisoned direct tasked writer");
-                match &*writer {
-                    TaskedDirectWriter::Tcp(stream) => {
+                match writer.as_ref() {
+                    Some(TaskedDirectWriter::Tcp(stream)) => {
                         let _ = shutdown_tcp_stream(stream, Shutdown::Write);
                     }
                     #[cfg(unix)]
-                    TaskedDirectWriter::Unix(stream) => {
+                    Some(TaskedDirectWriter::Unix(stream)) => {
                         let _ = shutdown_unix_stream(stream, Shutdown::Write);
                     }
+                    None => {}
                 }
             }
             if self.core.close_on_write_eof() {
@@ -2997,12 +3103,13 @@ fn new_stream_transport_core(
         loop_obj: parts.loop_obj,
         state: Mutex::new(parts.state),
         pending_read_events: Mutex::new(VecDeque::new()),
+        read_buffer_pool: Arc::new(ReadBufferPool::new()),
         pending_read_bytes: AtomicUsize::new(0),
         read_events_scheduled: AtomicBool::new(false),
         reading: AtomicBool::new(reading),
         detached: AtomicBool::new(false),
         writer_tx,
-        direct_writer: direct_writer.map(Mutex::new),
+        direct_writer: direct_writer.map(|writer| Mutex::new(Some(writer))),
         pending_direct_write: Mutex::new(Vec::new()),
         direct_write_scheduled: AtomicBool::new(false),
         #[cfg(windows)]
@@ -3169,7 +3276,7 @@ pub fn spawn_tcp_transport(
     let extra = HashMap::new();
     let callbacks = build_protocol_callbacks(py, &spawn_context.protocol)?;
     spawn_context.context_needs_run &= callbacks.stream_reader_fast_path.is_none();
-    let direct_writer = duplicate_configured_tcp_stream(raw_fd)?;
+    let stream = Arc::new(stream);
     let (writer_tx, writer_rx) = mpsc::channel();
     let parts = stream_transport_state_parts(
         spawn_context,
@@ -3189,7 +3296,7 @@ pub fn spawn_tcp_transport(
     let core = new_stream_transport_core(
         parts,
         writer_tx,
-        Some(TaskedDirectWriter::Tcp(direct_writer)),
+        Some(TaskedDirectWriter::Tcp(Arc::clone(&stream))),
         Some(LazyWriterConfig {
             target: LazyWriterTarget::Tcp(raw_fd),
             writer_rx,
@@ -4322,13 +4429,28 @@ fn stop_socket_reader(core: &StreamTransportCore, fd: fd_ops::RawFd) -> io::Resu
         .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))
 }
 
+/// Requests reader cancellation without synchronously crossing to the runtime
+/// thread. Normal close/abort already mark the transport closing and shut down
+/// the socket, so waiting for the acknowledgement only adds teardown latency.
+/// TLS upgrade continues to use `stop_socket_reader`, where exclusive access to
+/// the underlying stream is required before handshake bytes can be consumed.
+fn stop_socket_reader_nowait(core: &StreamTransportCore, fd: fd_ops::RawFd) -> io::Result<()> {
+    let (done_tx, _done_rx) = mpsc::channel();
+    core.loop_core
+        .send_command(LoopCommand::Io(LoopIoCommand::StopSocketReader {
+            fd,
+            done_tx,
+        }))
+        .map_err(io::Error::other)
+}
+
 #[cfg(not(windows))]
 pub(crate) async fn run_tcp_socket_reader_task(
     core: Arc<StreamTransportCore>,
-    stream: StdTcpStream,
+    stream: Arc<StdTcpStream>,
 ) {
     profiling::scope!("stream.run_tcp_socket_reader_task");
-    let mut reader = match VibePollTcpStream::from_std(stream) {
+    let mut reader = match VibePollTcpStream::from_shared(stream) {
         Ok(reader) => reader,
         Err(err) => {
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
@@ -4360,7 +4482,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
                 return;
             }
             Ok(_) => {
-                let data = take_async_read_data(&mut buf);
+                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
                 core.enqueue_pending_read_event(PendingReadEvent::Data(data));
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
@@ -4378,7 +4500,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
 #[cfg(windows)]
 pub(crate) async fn run_tcp_socket_reader_task(
     core: Arc<StreamTransportCore>,
-    stream: StdTcpStream,
+    stream: Arc<StdTcpStream>,
 ) {
     profiling::scope!("stream.run_tcp_socket_reader_task");
 
@@ -4387,7 +4509,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
     // either endpoint may call start_tls(), which reclaims the socket
     // synchronously.
     if !core.native_stream_reader {
-        match VibePollTcpStream::from_std(stream) {
+        match VibePollTcpStream::from_shared(stream) {
             Ok(reader) => {
                 run_windows_poll_tcp_reader(
                     core,
@@ -4405,15 +4527,16 @@ pub(crate) async fn run_tcp_socket_reader_task(
 
     // Native fast-stream readers use completion mode. A native server switches
     // to readiness mode when a large response begins.
-    let mut reader = match VibeTcpStream::from_std(stream) {
-        Ok(reader) => reader,
-        Err(err) => {
-            core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
-                err.to_string(),
-            )));
-            return;
-        }
-    };
+    let mut reader =
+        match VibeTcpStream::from_shared(stream, vibeio::driver::RegistrationMode::Completion) {
+            Ok(reader) => reader,
+            Err(err) => {
+                core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+                    err.to_string(),
+                )));
+                return;
+            }
+        };
     let mut buf = Vec::with_capacity(STREAM_READ_BUFFER_SIZE);
 
     loop {
@@ -4450,7 +4573,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
             }
             Ok(read) => {
                 let saturated = read == buf.capacity();
-                let data = take_async_read_data(&mut buf);
+                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
                 let tiny_server_trigger =
                     core.server_side && read <= SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES;
 
@@ -4533,7 +4656,7 @@ async fn run_windows_poll_tcp_reader(
                 return;
             }
             Ok(_) => {
-                let data = take_async_read_data(&mut buf);
+                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
                 core.enqueue_pending_read_event(PendingReadEvent::Data(data));
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
@@ -4582,7 +4705,7 @@ pub(crate) async fn run_unix_socket_reader_task(
                 return;
             }
             Ok(_) => {
-                let data = take_async_read_data(&mut buf);
+                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
                 core.enqueue_pending_read_event(PendingReadEvent::Data(data));
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
@@ -4597,7 +4720,7 @@ pub(crate) async fn run_unix_socket_reader_task(
     }
 }
 
-fn take_async_read_data(buf: &mut Vec<u8>) -> Vec<u8> {
+fn take_async_read_data(buf: &mut Vec<u8>, pool: &ReadBufferPool) -> Vec<u8> {
     let capacity = buf.capacity().max(STREAM_READ_BUFFER_SIZE);
     let next_capacity = if buf.len() == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
         (capacity * 2).min(MAX_STREAM_READ_BUFFER_SIZE)
@@ -4610,11 +4733,12 @@ fn take_async_read_data(buf: &mut Vec<u8>) -> Vec<u8> {
     if buf.len() < OWNED_READ_HANDOFF_MIN_BYTES {
         let data = buf.clone();
         if next_capacity != capacity {
-            *buf = Vec::with_capacity(next_capacity);
+            let previous = std::mem::replace(buf, pool.acquire(next_capacity));
+            pool.release(previous);
         }
         return data;
     }
-    std::mem::replace(buf, Vec::with_capacity(next_capacity))
+    std::mem::replace(buf, pool.acquire(next_capacity))
 }
 
 pub(crate) fn run_socket_reader_blocking(

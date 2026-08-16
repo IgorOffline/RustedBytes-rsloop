@@ -1,6 +1,6 @@
 //! Optimized asyncio stream reader, protocol, and writer bindings.
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyStopIteration, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -12,6 +12,31 @@ use crate::bindings::PyLoop;
 use crate::python_names;
 
 const DEFAULT_STREAM_LIMIT: usize = 65_536;
+
+/// Single-use awaitable for reads that are already satisfied from the native
+/// buffer. Returning a completed asyncio Future here allocates Future state and
+/// calls `set_result` for every WebSocket header and payload slice even though no
+/// scheduling is required.
+#[pyclass(module = "rsloop._loop")]
+struct PyImmediateRead {
+    value: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PyImmediateRead {
+    fn __await__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __iter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let value = self.value.take().unwrap_or_else(|| py.None());
+        Err(PyStopIteration::new_err(value))
+    }
+}
 
 fn asyncio_iscoroutine(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static ISCOROUTINE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -71,15 +96,17 @@ impl ReadBuffer {
         self.bytes.extend_from_slice(data);
     }
 
-    fn extend_owned(&mut self, data: Vec<u8>) {
+    fn extend_owned(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {
         if data.is_empty() {
-            return;
+            return Some(data);
         }
         if self.is_empty() {
-            self.bytes = data;
+            let previous = std::mem::replace(&mut self.bytes, data);
             self.start = 0;
+            Some(previous)
         } else {
             self.extend(&data);
+            Some(data)
         }
     }
 
@@ -143,10 +170,11 @@ mod read_buffer_tests {
         let data = vec![7_u8; 1024];
         let data_ptr = data.as_ptr();
 
-        buffer.extend_owned(data);
+        let recycled = buffer.extend_owned(data);
 
         assert_eq!(buffer.unread().as_ptr(), data_ptr);
         assert_eq!(buffer.unread(), &[7_u8; 1024]);
+        assert!(recycled.is_some());
     }
 }
 
@@ -302,15 +330,8 @@ impl PyFastStreamReader {
         loop_create_future(py, &self.loop_obj)
     }
 
-    fn ready_result_future(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        let future = self.create_future(py)?;
-        python_names::call_method1(
-            py,
-            future.bind(py),
-            python_names::set_result(py),
-            value.bind(py),
-        )?;
-        Ok(future)
+    fn ready_result_awaitable(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        Ok(Py::new(py, PyImmediateRead { value: Some(value) })?.into_any())
     }
 
     fn ready_exception_future(&self, py: Python<'_>, exc: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -517,13 +538,14 @@ impl PyFastStreamReader {
         &mut self,
         py: Python<'_>,
         data: Vec<u8>,
-    ) -> PyResult<()> {
+    ) -> PyResult<Option<Vec<u8>>> {
         if self.eof {
             return Err(PyValueError::new_err("feed_data after feed_eof"));
         }
-        self.buffer.extend_owned(data);
+        let recycled = self.buffer.extend_owned(data);
         self.maybe_complete_waiter(py)?;
-        self.maybe_pause_transport(py)
+        self.maybe_pause_transport(py)?;
+        Ok(recycled)
     }
 
     #[inline]
@@ -546,12 +568,12 @@ impl PyFastStreamReader {
             return self.ready_exception_future(py, exc.clone_ref(py));
         }
         if n == 0 {
-            return self.ready_result_future(py, Self::bytes_object(py, &[]));
+            return self.ready_result_awaitable(py, Self::bytes_object(py, &[]));
         }
         if n < 0 {
             if self.eof {
                 let data = self.unread_all_bytes_object(py);
-                return self.ready_result_future(py, data);
+                return self.ready_result_awaitable(py, data);
             }
             return self.start_waiter(py, "read", ReadWaitKind::All);
         }
@@ -559,7 +581,7 @@ impl PyFastStreamReader {
         if !self.buffer.is_empty() || self.eof {
             let data = self.unread_bytes_object(py, n);
             self.maybe_resume_transport(py)?;
-            return self.ready_result_future(py, data);
+            return self.ready_result_awaitable(py, data);
         }
         self.start_waiter(py, "read", ReadWaitKind::Any(n))
     }
@@ -569,12 +591,12 @@ impl PyFastStreamReader {
             return self.ready_exception_future(py, exc.clone_ref(py));
         }
         if n == 0 {
-            return self.ready_result_future(py, Self::bytes_object(py, &[]));
+            return self.ready_result_awaitable(py, Self::bytes_object(py, &[]));
         }
         if self.buffer.len() >= n {
             let data = self.unread_bytes_object(py, n);
             self.maybe_resume_transport(py)?;
-            return self.ready_result_future(py, data);
+            return self.ready_result_awaitable(py, data);
         }
         if self.eof {
             let err = Self::incomplete_read_error(py, self.buffer.unread(), n)?;

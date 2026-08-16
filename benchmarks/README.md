@@ -84,6 +84,13 @@ The scenarios are:
 - `tls_http`: the same workload over TLS
 - `websocket_messages`: concurrent persistent RFC 6455 connections with
   masked client frames and mixed message sizes
+- `websocket_tls`: the raw RFC 6455 workload over TLS
+- `websockets_messages` / `websockets_tls`: the same message pattern through
+  the `websockets` client and server with compression disabled
+- `aiohttp_websocket_messages` / `aiohttp_websocket_tls`: an aiohttp server
+  driven by the same `websockets` client, also with compression disabled
+- `starlette_websocket_messages` / `starlette_websocket_tls`: Starlette's ASGI
+  WebSocket path served by uvicorn with per-message deflate disabled
 - `mixed_streams`: concurrent connections cycling through 64 B to 64 KiB
   messages
 - `bulk_transfer`: concurrent large transfers with `drain()` backpressure
