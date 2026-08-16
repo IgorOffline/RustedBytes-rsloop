@@ -122,6 +122,7 @@ pub fn run_runtime_thread(core: Arc<LoopCore>, command_rx: Receiver<LoopCommand>
         shutting_down: false,
     };
     runtime.block_on(dispatcher);
+    core.set_runtime_waker(None);
 }
 
 impl Future for RuntimeDispatcher {
@@ -129,10 +130,11 @@ impl Future for RuntimeDispatcher {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         profiling::scope!("runtime.dispatcher.poll");
-        // Register before inspecting the command channel. AtomicWaker makes a
-        // concurrent send either wake this registration or remain observable
-        // by the next poll, closing the empty-channel/return-Pending race.
-        self.core.register_runtime_waker(cx.waker());
+        // Register before inspecting the command channel so a concurrent send
+        // either wakes this poll or remains visible when the channel is
+        // drained.  The retained waker is intentional: consuming it while the
+        // dispatcher task is already queued can strand the following command.
+        self.core.set_runtime_waker(Some(cx.waker().clone()));
         loop {
             if self.shutting_down {
                 return Poll::Ready(());

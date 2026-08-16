@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import unittest
 import warnings
 
@@ -133,6 +134,20 @@ class RunTests(unittest.TestCase):
             return "ok"
 
         self.assertEqual(rsloop.run(main()), "ok")
+
+    def test_repeated_delayed_thread_completions_wake_loop(self) -> None:
+        def delayed_result(value: int) -> int:
+            # Let the loop leave its short spin window and park in the OS
+            # selector before the worker schedules its completion.
+            time.sleep(0.001)
+            return value
+
+        async def main() -> None:
+            for expected in range(500):
+                actual = await run_in_thread(delayed_result, expected)
+                self.assertEqual(actual, expected)
+
+        rsloop.run(main())
 
     def test_repeated_command_dispatch_across_runs(self) -> None:
         loop = rsloop.new_event_loop()
