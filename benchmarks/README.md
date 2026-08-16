@@ -53,7 +53,8 @@ The runner executes each loop/workload in a fresh subprocess and reports:
 - median time
 - best time
 - operations per second
-- relative slowdown versus the fastest loop for that workload
+- relative slowdown versus the fastest loop for that workload, as both a
+  multiplier and a percentage
 
 Current workloads:
 

@@ -566,11 +566,11 @@ def print_workload_table(workload: str, runs: dict[str, list[ChildResult]]) -> N
     print(f"{workload} ({rows[0][4]:,} ops)")
     if sys.platform == "linux":
         print(
-            f"{'loop':<10} {'median_s':>12} {'best_s':>12} {'ops_per_s':>14} {'baseline_rss':>14} {'peak_rss':>12} {'peak_delta':>12} {'vs_fastest':>12}"
+            f"{'loop':<10} {'median_s':>12} {'best_s':>12} {'ops_per_s':>14} {'baseline_rss':>14} {'peak_rss':>12} {'peak_delta':>12} {'vs_fastest':>12} {'slower_by':>12}"
         )
     else:
         print(
-            f"{'loop':<10} {'median_s':>12} {'best_s':>12} {'ops_per_s':>14} {'peak_rss':>12} {'vs_fastest':>12}"
+            f"{'loop':<10} {'median_s':>12} {'best_s':>12} {'ops_per_s':>14} {'peak_rss':>12} {'vs_fastest':>12} {'slower_by':>12}"
         )
     for (
         loop_name,
@@ -583,6 +583,7 @@ def print_workload_table(workload: str, runs: dict[str, list[ChildResult]]) -> N
         median_peak_rss_delta,
     ) in rows:
         relative = median_seconds / fastest if fastest > 0 else 1.0
+        slower_percent = max(0.0, (relative - 1.0) * 100.0)
         if sys.platform == "linux":
             print(
                 f"{loop_name:<10} "
@@ -592,7 +593,8 @@ def print_workload_table(workload: str, runs: dict[str, list[ChildResult]]) -> N
                 f"{format_bytes(median_baseline_rss):>14} "
                 f"{format_bytes(median_peak_rss):>12} "
                 f"{format_bytes(median_peak_rss_delta):>12} "
-                f"{relative:>11.2f}x"
+                f"{relative:>11.2f}x "
+                f"{slower_percent:>11.1f}%"
             )
         else:
             print(
@@ -601,7 +603,8 @@ def print_workload_table(workload: str, runs: dict[str, list[ChildResult]]) -> N
                 f"{best_seconds:>12.6f} "
                 f"{ops_per_sec:>14,.0f} "
                 f"{format_bytes(median_peak_rss):>12} "
-                f"{relative:>11.2f}x"
+                f"{relative:>11.2f}x "
+                f"{slower_percent:>11.1f}%"
             )
 
 

@@ -354,22 +354,22 @@ An example output from that script on macOS (arm64) with CPython 3.14:
 
 ```
 callbacks (200,000 ops)
-loop           median_s       best_s      ops_per_s     peak_rss   vs_fastest
-rsloop         0.033083     0.032710      6,045,401     67.5 MiB        1.00x
-uvloop         0.040958     0.040721      4,883,026     72.8 MiB        1.24x
-asyncio        0.082233     0.082093      2,432,114     65.3 MiB        2.49x
+loop           median_s       best_s      ops_per_s     peak_rss   vs_fastest    slower_by
+rsloop         0.033083     0.032710      6,045,401     67.5 MiB        1.00x         0.0%
+uvloop         0.040958     0.040721      4,883,026     72.8 MiB        1.24x        23.8%
+asyncio        0.082233     0.082093      2,432,114     65.3 MiB        2.49x       148.6%
 
 tasks (50,000 ops)
-loop           median_s       best_s      ops_per_s     peak_rss   vs_fastest
-rsloop         0.063593     0.063286        786,247     37.6 MiB        1.00x
-uvloop         0.069614     0.069420        718,251     38.4 MiB        1.09x
-asyncio        0.108114     0.107502        462,473     36.1 MiB        1.70x
+loop           median_s       best_s      ops_per_s     peak_rss   vs_fastest    slower_by
+rsloop         0.063593     0.063286        786,247     37.6 MiB        1.00x         0.0%
+uvloop         0.069614     0.069420        718,251     38.4 MiB        1.09x         9.5%
+asyncio        0.108114     0.107502        462,473     36.1 MiB        1.70x        70.0%
 
 tcp_streams (5,000 ops)
-loop           median_s       best_s      ops_per_s     peak_rss   vs_fastest
-rsloop         0.090940     0.083355         54,981     32.2 MiB        1.00x
-uvloop         0.133182     0.127404         37,543     31.5 MiB        1.46x
-asyncio        0.302337     0.299813         16,538     29.6 MiB        3.32x
+loop           median_s       best_s      ops_per_s     peak_rss   vs_fastest    slower_by
+rsloop         0.090940     0.083355         54,981     32.2 MiB        1.00x         0.0%
+uvloop         0.133182     0.127404         37,543     31.5 MiB        1.46x        46.5%
+asyncio        0.302337     0.299813         16,538     29.6 MiB        3.32x       232.5%
 ```
 
 See [`benchmarks/README.md`](./benchmarks/README.md) for workload details and
