@@ -21,6 +21,7 @@ def check_public_api() -> None:
     policy = rsloop.EventLoopPolicy()
     assert_type(policy.new_event_loop(), rsloop.Loop)
     assert_type(rsloop.run(result()), int)
+    assert_type(rsloop.build_info(), dict[str, str | bool])
     assert_type(rsloop.profiler_compiled(), bool)
     assert_type(rsloop.profiler_running(), bool)
 

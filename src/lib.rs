@@ -7,6 +7,7 @@
 mod async_event;
 mod bindings;
 mod blocking;
+mod build_metadata;
 mod context;
 mod engine;
 mod errors;

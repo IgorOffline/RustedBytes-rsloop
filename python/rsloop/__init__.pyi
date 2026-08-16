@@ -12,6 +12,8 @@ Loop = PyLoop
 
 __version__: str
 
+def build_info() -> dict[str, str | bool]: ...
+
 class EventLoopPolicy(DefaultEventLoopPolicy):
     def new_event_loop(self) -> Loop: ...
 

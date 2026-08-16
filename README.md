@@ -20,7 +20,8 @@ The package exposes:
 - a native extension module at `rsloop._loop`
 - a Python wrapper in [`python/rsloop/__init__.py`](./python/rsloop/__init__.py)
 - `rsloop.Loop`, `rsloop.EventLoopPolicy`, `rsloop.new_event_loop()`,
-  `rsloop.run(...)`, `rsloop.install()`, and `rsloop.uninstall()`
+  `rsloop.run(...)`, `rsloop.install()`, `rsloop.uninstall()`, and
+  `rsloop.build_info()`
 
 Repository metadata currently targets Python `>=3.10`.
 

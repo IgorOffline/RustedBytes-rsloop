@@ -55,6 +55,38 @@ async def run_in_thread(func, /, *args):
 
 
 class RunTests(unittest.TestCase):
+    def test_build_info_describes_native_extension(self) -> None:
+        info = rsloop.build_info()
+        expected_reactor = (
+            "iocp"
+            if sys.platform == "win32"
+            else "io_uring"
+            if sys.platform.startswith("linux")
+            else "mio"
+        )
+
+        self.assertEqual(
+            set(info),
+            {
+                "version",
+                "profile",
+                "target_os",
+                "target_arch",
+                "free_threaded",
+                "reactor",
+                "tls_backend",
+                "profiler",
+            },
+        )
+        self.assertEqual(info["version"], rsloop.__version__)
+        self.assertIn(info["profile"], {"debug", "release"})
+        self.assertTrue(info["target_os"])
+        self.assertTrue(info["target_arch"])
+        self.assertIsInstance(info["free_threaded"], bool)
+        self.assertEqual(info["reactor"], expected_reactor)
+        self.assertEqual(info["tls_backend"], "rustls")
+        self.assertEqual(info["profiler"], rsloop.profiler_compiled())
+
     def test_install_makes_asyncio_create_rsloop_loops(self) -> None:
         original_policy = get_event_loop_policy()
         try:

@@ -8,6 +8,7 @@ __bootstrap()
 
 from ._loop_compat import Loop
 from ._loop_compat import __version__
+from ._loop_compat import build_info
 from ._profile import profile
 from ._profile import profiler_compiled
 from ._profile import profiler_running
@@ -23,6 +24,7 @@ __all__: tuple[str, ...] = (
     "EventLoopPolicy",
     "Loop",
     "__version__",
+    "build_info",
     "install",
     "new_event_loop",
     "profile",

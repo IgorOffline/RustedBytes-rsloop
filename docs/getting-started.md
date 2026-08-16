@@ -29,6 +29,7 @@ The package exports a small public surface:
 - `rsloop.Loop`
 - `rsloop.EventLoopPolicy`
 - `rsloop.__version__`
+- `rsloop.build_info()`
 - `rsloop.new_event_loop()`
 - `rsloop.run(...)`
 - `rsloop.install()`
@@ -40,6 +41,22 @@ The package exports a small public surface:
 - `rsloop.profiler_running()`
 
 For most programs, `rsloop.run(...)` is enough.
+
+## Build diagnostics
+
+Use `build_info()` when reporting an installation or platform-specific issue:
+
+```python
+import rsloop
+
+
+print(rsloop.build_info())
+```
+
+It returns the package version, debug or release profile, target OS and
+architecture, free-threaded Python status, selected I/O reactor, TLS backend,
+and whether profiler support was compiled in. The exact values depend on the
+installed wheel or local build.
 
 ## Simplest way to use it
 

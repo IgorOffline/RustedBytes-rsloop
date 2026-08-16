@@ -6,6 +6,7 @@ use crate::bindings::{
     PyLoop, asyncgen_finalizer_hook, asyncgen_firstiter_hook, future_done_stop, new_event_loop,
     signal_bridge,
 };
+use crate::build_metadata::build_info;
 use crate::engine::{PyHandle, PyTimerHandle};
 use crate::profiler::{profiler_compiled, profiler_running, start_profiler, stop_profiler};
 use crate::transport::process::{PyProcessPipeTransport, PyProcessTransport};
@@ -19,6 +20,7 @@ pub(crate) fn add_module_contents(m: &Bound<'_, PyModule>) -> PyResult<()> {
     add_event_loop_functions(m)?;
     add_stream_functions(m)?;
     add_profiler_functions(m)?;
+    add_diagnostic_functions(m)?;
     add_module_compat_aliases(m)?;
     Ok(())
 }
@@ -56,6 +58,11 @@ fn add_profiler_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(profiler_running, m)?)?;
     m.add_function(wrap_pyfunction!(start_profiler, m)?)?;
     m.add_function(wrap_pyfunction!(stop_profiler, m)?)?;
+    Ok(())
+}
+
+fn add_diagnostic_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
     Ok(())
 }
 
