@@ -54,14 +54,10 @@ def install_ssl_tracking() -> None:
         state = context.__dict__
         state["_rsloop_tls_generation"] = state.get("_rsloop_tls_generation", 0) + 1
 
-    orig_create_default_context = __ssl.create_default_context
     orig_load_cert_chain = context_cls.load_cert_chain
     orig_load_default_certs = context_cls.load_default_certs
     orig_load_verify_locations = context_cls.load_verify_locations
     orig_set_default_verify_paths = context_cls.set_default_verify_paths
-
-    def create_default_context(*args, **kwargs):
-        return mark_default_verify_paths(orig_create_default_context(*args, **kwargs))
 
     def load_cert_chain(self, certfile, keyfile=None, password=None):
         result = orig_load_cert_chain(
@@ -103,7 +99,6 @@ def install_ssl_tracking() -> None:
         mark_tls_config_changed(self)
         return result
 
-    __ssl.create_default_context = create_default_context
     context_cls.load_cert_chain = load_cert_chain
     context_cls.load_default_certs = load_default_certs
     context_cls.load_verify_locations = load_verify_locations

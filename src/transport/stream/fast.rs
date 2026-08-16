@@ -917,6 +917,11 @@ impl PyFastStreamProtocol {
                 self.resolve_drain_waiters(py, None)?;
             }
         }
+        {
+            let mut reader = self.reader.borrow_mut(py);
+            reader.transport = py.None();
+            reader.paused = false;
+        }
         self.transport = py.None();
         self.task = py.None();
         Ok(())

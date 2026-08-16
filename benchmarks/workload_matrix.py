@@ -96,6 +96,13 @@ class MatrixResult:
             else 0.0
         )
 
+    @property
+    def traffic_mib_per_sec(self) -> float:
+        denominator = self.traffic_seconds or self.seconds
+        return (
+            self.bytes_transferred / (1024 * 1024) / denominator if denominator else 0.0
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -112,6 +119,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenarios", default=DEFAULT_SCENARIOS)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument(
+        "--measurement-mode",
+        choices=("warm", "cold"),
+        default="warm",
+        help=(
+            "Run warmups and measurements in one child process (warm, default), "
+            "or isolate every run in a fresh process (cold)."
+        ),
+    )
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--requests-per-connection", type=int, default=50)
     parser.add_argument("--http-response-size", type=int, default=4096)
@@ -148,6 +164,7 @@ def parse_args() -> argparse.Namespace:
         help="Allow measured rsloop runs from a Tracy-enabled build.",
     )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--child-runs", type=int, default=1, help=argparse.SUPPRESS)
     parser.add_argument("--loop", choices=LOOP_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument("--scenario", choices=SCENARIO_CHOICES, help=argparse.SUPPRESS)
     parser.add_argument("--profile-label", help=argparse.SUPPRESS)
@@ -163,6 +180,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.warmups < 0:
         raise SystemExit("--warmups must be >= 0")
     positive(args.repeat, "--repeat")
+    positive(args.child_runs, "--child-runs")
     positive(args.concurrency, "--concurrency")
     positive(args.requests_per_connection, "--requests-per-connection")
     positive(args.http_response_size, "--http-response-size")
@@ -727,16 +745,26 @@ def child_main(args: argparse.Namespace) -> int:
                 "--features profiler or pass --allow-profiler-build explicitly"
             )
 
+    results: list[MatrixResult] = []
     if args.profile_label:
         print(f"[profile] Tracy session label: {args.profile_label}", flush=True)
-        with rsloop.profile():
+    for _ in range(args.child_runs):
+        if args.profile_label:
+            with rsloop.profile():
+                awaitable = SCENARIO_RUNNERS[args.scenario](args.loop, args)
+                result = run_with_loop(args.loop, awaitable)
+        else:
             awaitable = SCENARIO_RUNNERS[args.scenario](args.loop, args)
             result = run_with_loop(args.loop, awaitable)
-    else:
-        awaitable = SCENARIO_RUNNERS[args.scenario](args.loop, args)
-        result = run_with_loop(args.loop, awaitable)
-    result = MatrixResult(**{**asdict(result), "peak_rss_bytes": get_peak_rss_bytes()})
-    print(json.dumps(asdict(result)))
+        results.append(
+            MatrixResult(**{**asdict(result), "peak_rss_bytes": get_peak_rss_bytes()})
+        )
+    payload: object = (
+        asdict(results[0])
+        if len(results) == 1
+        else [asdict(result) for result in results]
+    )
+    print(json.dumps(payload))
     return 0
 
 
@@ -745,6 +773,7 @@ def child_command(
     loop_name: str,
     scenario: str,
     profile_label: str | None = None,
+    child_runs: int = 1,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -776,6 +805,8 @@ def child_command(
         str(args.idle_seconds),
         "--tls-dir",
         str(args.tls_dir),
+        "--child-runs",
+        str(child_runs),
     ]
     if profile_label:
         cmd.extend(("--profile-label", profile_label))
@@ -784,17 +815,18 @@ def child_command(
     return cmd
 
 
-def run_child(
+def run_child_batch(
     args: argparse.Namespace,
     loop_name: str,
     scenario: str,
     profile_label: str | None = None,
-) -> MatrixResult:
+    child_runs: int = 1,
+) -> list[MatrixResult]:
     env = os.environ.copy()
     if loop_name == "rsloop":
         env["RSLOOP_USE_FAST_STREAMS"] = "1"
     proc = subprocess.run(
-        child_command(args, loop_name, scenario, profile_label),
+        child_command(args, loop_name, scenario, profile_label, child_runs),
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -809,7 +841,19 @@ def run_child(
     lines = [line for line in proc.stdout.splitlines() if line.strip()]
     if not lines:
         raise RuntimeError(f"{loop_name}/{scenario} produced no output")
-    return MatrixResult(**json.loads(lines[-1]))
+    payload = json.loads(lines[-1])
+    if isinstance(payload, dict):
+        payload = [payload]
+    return [MatrixResult(**item) for item in payload]
+
+
+def run_child(
+    args: argparse.Namespace,
+    loop_name: str,
+    scenario: str,
+    profile_label: str | None = None,
+) -> MatrixResult:
+    return run_child_batch(args, loop_name, scenario, profile_label)[0]
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -824,19 +868,23 @@ def summarize(scenario: str, runs: dict[str, list[MatrixResult]]) -> None:
     rows = []
     for loop_name, measured in runs.items():
         median_seconds = statistics.median(item.seconds for item in measured)
-        representative = min(
-            measured, key=lambda item: abs(item.seconds - median_seconds)
-        )
         rows.append(
             (
                 loop_name,
                 median_seconds,
-                representative.operations / median_seconds,
-                representative.traffic_ops_per_sec,
-                representative.bytes_transferred / (1024 * 1024) / median_seconds,
-                percentile(representative.latency_ms, 0.50),
-                percentile(representative.latency_ms, 0.95),
-                percentile(representative.latency_ms, 0.99),
+                statistics.median(item.ops_per_sec for item in measured),
+                statistics.median(item.traffic_ops_per_sec for item in measured),
+                statistics.median(item.mib_per_sec for item in measured),
+                statistics.median(item.traffic_mib_per_sec for item in measured),
+                statistics.median(
+                    percentile(item.latency_ms, 0.50) for item in measured
+                ),
+                statistics.median(
+                    percentile(item.latency_ms, 0.95) for item in measured
+                ),
+                statistics.median(
+                    percentile(item.latency_ms, 0.99) for item in measured
+                ),
                 int(statistics.median(item.peak_rss_bytes for item in measured)),
                 statistics.median(item.connection_setup_seconds for item in measured),
                 statistics.median(item.traffic_seconds for item in measured),
@@ -848,16 +896,16 @@ def summarize(scenario: str, runs: dict[str, list[MatrixResult]]) -> None:
     print(f"\n{scenario}")
     print(
         f"{'loop':<10} {'median_s':>10} {'total_ops/s':>12} {'traffic_ops/s':>14} "
-        f"{'MiB/s':>10} "
+        f"{'MiB/s':>10} {'traffic MiB/s':>14} "
         f"{'p50_ms':>10} {'p95_ms':>10} {'p99_ms':>10} {'peak_rss':>12} "
         f"{'setup_s':>9} {'traffic_s':>10} {'close_s':>9} {'idle_s':>8}"
     )
     for row in rows:
         print(
             f"{row[0]:<10} {row[1]:>10.4f} {row[2]:>12,.0f} {row[3]:>14,.0f} "
-            f"{row[4]:>10.1f} {row[5]:>10.3f} {row[6]:>10.3f} {row[7]:>10.3f} "
-            f"{format_bytes(row[8]):>12} {row[9]:>9.4f} {row[10]:>10.4f} "
-            f"{row[11]:>9.4f} {row[12]:>8.4f}"
+            f"{row[4]:>10.1f} {row[5]:>14.1f} {row[6]:>10.3f} {row[7]:>10.3f} "
+            f"{row[8]:>10.3f} {format_bytes(row[9]):>12} {row[10]:>9.4f} "
+            f"{row[11]:>10.4f} {row[12]:>9.4f} {row[13]:>8.4f}"
         )
 
 
@@ -902,16 +950,26 @@ def parent_main(args: argparse.Namespace) -> int:
                 args.profile_rsloop_dir.mkdir(parents=True, exist_ok=True)
                 label = str(args.profile_rsloop_dir / f"rsloop-{scenario}")
                 run_child(args, loop_name, scenario, label)
-            for _ in range(args.warmups):
-                run_child(args, loop_name, scenario)
-            measured = [
-                run_child(args, loop_name, scenario) for _ in range(args.repeat)
-            ]
+            if args.measurement_mode == "warm":
+                batch = run_child_batch(
+                    args,
+                    loop_name,
+                    scenario,
+                    child_runs=args.warmups + args.repeat,
+                )
+                measured = batch[args.warmups :]
+            else:
+                for _ in range(args.warmups):
+                    run_child(args, loop_name, scenario)
+                measured = [
+                    run_child(args, loop_name, scenario) for _ in range(args.repeat)
+                ]
             scenario_runs[loop_name] = measured
             output.append(
                 {
                     "scenario": scenario,
                     "loop": loop_name,
+                    "measurement_mode": args.measurement_mode,
                     "runs": [asdict(item) for item in measured],
                 }
             )

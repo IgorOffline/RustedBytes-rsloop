@@ -81,6 +81,12 @@ The separate coordination thread is transitional infrastructure. This hybrid
 model explains why some paths run directly through the loop-thread reactor while
 other paths still cross threads or use helper workers.
 
+Stream transports pause their socket reader when the pending inbound queue
+reaches 1 MiB and resume below 256 KiB. Buffered writes default to a 64 MiB
+safety cap (`RSLOOP_MAX_WRITE_BUFFER_BYTES`), while TLS servers default to 256
+simultaneous handshakes (`RSLOOP_MAX_PENDING_TLS_HANDSHAKES`). Set either
+environment variable before importing `rsloop` to tune the limit.
+
 ## Compatibility goal
 
 The project tries to feel close to standard `asyncio`.

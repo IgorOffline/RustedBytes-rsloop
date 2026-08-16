@@ -85,6 +85,12 @@ class TlsTests(unittest.TestCase):
         context = ssl.create_default_context()
         self.assertTrue(context.__dict__.get("_rsloop_use_default_verify_paths"))
 
+    def test_create_default_context_with_explicit_ca_skips_default_paths(self) -> None:
+        context = ssl.create_default_context(
+            cafile=TLS_FIXTURES_DIR.joinpath("ca-cert.pem")
+        )
+        self.assertIsNone(context.__dict__.get("_rsloop_use_default_verify_paths"))
+
     def test_client_config_cache_reuses_and_invalidates(self) -> None:
         async def main() -> tuple[bool, bool]:
             async def echo(
@@ -135,6 +141,30 @@ class TlsTests(unittest.TestCase):
                     await server.wait_closed()
 
         self.assertEqual(rsloop.run(main()), (True, True))
+
+    def test_server_close_cancels_pending_tls_handshake(self) -> None:
+        async def main() -> None:
+            async def handle(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                writer.close()
+                await writer.wait_closed()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                server_ctx, _ = make_ssl_contexts(tmpdir)
+                server = await asyncio.start_server(
+                    handle, "127.0.0.1", 0, ssl=server_ctx
+                )
+                port = server.sockets[0].getsockname()[1]
+                plain_socket = socket.create_connection(("127.0.0.1", port))
+                try:
+                    await asyncio.sleep(0.05)
+                    server.close()
+                    await asyncio.wait_for(server.wait_closed(), 1.0)
+                finally:
+                    plain_socket.close()
+
+        rsloop.run(main())
 
     def test_create_connection_and_server_tls_round_trip(self) -> None:
         async def main() -> tuple[str, tuple[int, ...]]:

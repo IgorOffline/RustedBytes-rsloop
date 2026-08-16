@@ -25,6 +25,41 @@ EXCEPTION_GROUP = getattr(builtins, "ExceptionGroup", None)
 
 
 class CompatibilityTests(unittest.TestCase):
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "requires descriptor enumeration")
+    def test_closed_streams_do_not_retain_descriptors_across_loops(self) -> None:
+        async def exercise() -> None:
+            async def echo(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                try:
+                    writer.write(await reader.readexactly(1))
+                    await writer.drain()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+
+            server = await asyncio.start_server(echo, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            connections = await asyncio.gather(
+                *(asyncio.open_connection("127.0.0.1", port) for _ in range(10))
+            )
+            for reader, writer in connections:
+                writer.write(b"x")
+                await writer.drain()
+                self.assertEqual(await reader.readexactly(1), b"x")
+                writer.close()
+            await asyncio.gather(*(writer.wait_closed() for _, writer in connections))
+            server.close()
+            await server.wait_closed()
+
+        before = len(os.listdir("/dev/fd"))
+        rsloop.run(exercise())
+        after_first = len(os.listdir("/dev/fd"))
+        rsloop.run(exercise())
+        after_second = len(os.listdir("/dev/fd"))
+        self.assertLessEqual(after_first, before + 2)
+        self.assertLessEqual(after_second, after_first + 1)
+
     def test_create_connection_refused_does_not_hang(self) -> None:
         async def main() -> None:
             # Close a bound socket to obtain a port with no listener. On some

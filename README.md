@@ -220,6 +220,12 @@ The runtime is centered on one `vibeio` runtime per loop:
 The runtime dependency is now unified, but the codebase has not finished
 eliminating every helper thread yet.
 
+Transport overload safeguards use conservative defaults: inbound reads pause
+at 1 MiB of pending data per connection, buffered writes are capped at 64 MiB,
+and a TLS server admits at most 256 simultaneous handshakes. The last two limits
+can be adjusted before importing `rsloop` with
+`RSLOOP_MAX_WRITE_BUFFER_BYTES` and `RSLOOP_MAX_PENDING_TLS_HANDSHAKES`.
+
 ## Current Limitations
 
 These gaps are visible in the current implementation.

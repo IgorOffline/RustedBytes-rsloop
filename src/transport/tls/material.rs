@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::{self, BufReader, Cursor};
+use std::sync::OnceLock;
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -9,10 +10,27 @@ use pyo3::types::{PyBytes, PyDict};
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+static NATIVE_ROOTS: OnceLock<Result<Vec<CertificateDer<'static>>, String>> = OnceLock::new();
+
+fn native_root_certificates() -> PyResult<&'static [CertificateDer<'static>]> {
+    profiling::scope!("tls.native_root_certificates");
+    let result = NATIVE_ROOTS.get_or_init(|| {
+        let native = rustls_native_certs::load_native_certs();
+        if let Some(error) = native.errors.into_iter().next() {
+            return Err(error.to_string());
+        }
+        Ok(native.certs)
+    });
+    result.as_deref().map_err(|error| {
+        PyRuntimeError::new_err(format!("failed to load native CA certificates: {error}"))
+    })
+}
+
 pub(super) fn root_store_from_context(
     py: Python<'_>,
     ssl_context: &Py<PyAny>,
 ) -> PyResult<RootCertStore> {
+    profiling::scope!("tls.root_store_from_context");
     let kwargs = PyDict::new(py);
     kwargs.set_item("binary_form", true)?;
     let certs = ssl_context.call_method(py, "get_ca_certs", (), Some(&kwargs))?;
@@ -33,14 +51,8 @@ pub(super) fn root_store_from_context(
         .and_then(|value| value.extract::<bool>().ok())
         .unwrap_or(false);
     if use_default_verify_paths {
-        let native = rustls_native_certs::load_native_certs();
-        if let Some(error) = native.errors.into_iter().next() {
-            return Err(PyRuntimeError::new_err(format!(
-                "failed to load native CA certificates: {error}"
-            )));
-        }
-        for cert in native.certs {
-            roots.add(cert).map_err(to_py_tls_err)?;
+        for cert in native_root_certificates()? {
+            roots.add(cert.clone()).map_err(to_py_tls_err)?;
         }
     }
 

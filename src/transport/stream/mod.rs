@@ -14,7 +14,7 @@ use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixS
 use std::os::windows::io::IntoRawSocket;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
@@ -79,25 +79,53 @@ enum PendingReadEvent {
 
 const DEFAULT_WRITE_BUFFER_HIGH_WATER: usize = 64 * 1024;
 const DEFAULT_WRITE_BUFFER_LOW_WATER: usize = DEFAULT_WRITE_BUFFER_HIGH_WATER / 4;
+const DEFAULT_MAX_WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 const MAX_PENDING_READ_COALESCE_BYTES: usize = 256 * 1024;
-const MAX_READ_EVENTS_PER_DRAIN: usize = 32;
-const MAX_READ_BYTES_PER_DRAIN: usize = 256 * 1024;
+const MAX_READ_EVENTS_PER_DRAIN: usize = 16;
+const MAX_READ_BYTES_PER_DRAIN: usize = 128 * 1024;
+const PENDING_READ_HIGH_WATER: usize = 1024 * 1024;
+const PENDING_READ_LOW_WATER: usize = PENDING_READ_HIGH_WATER / 4;
 // Servers commonly emit a small protocol header followed immediately by a
 // body. Defer only that header-sized first write for one loop turn so adjacent
 // writes share a syscall; keep tiny control frames and larger payloads direct.
 const SMALL_WRITE_COALESCE_MIN_BYTES: usize = 64;
 const SMALL_WRITE_COALESCE_MAX_BYTES: usize = 512;
 const BLOCKING_POLL_INTERVAL_MS: i32 = 50;
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 // Keep the per-connection allocation modest. Large reads are delivered in
 // several owned chunks, while the pending-event drain can still coalesce the
 // slow protocol path up to MAX_PENDING_READ_COALESCE_BYTES.
 const STREAM_READ_BUFFER_SIZE: usize = 16 * 1024;
+const MAX_STREAM_READ_BUFFER_SIZE: usize = 64 * 1024;
 #[cfg(windows)]
 const SERVER_POLL_READER_WRITE_THRESHOLD: usize = STREAM_READ_BUFFER_SIZE;
 #[cfg(windows)]
 const SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES: usize = 16;
 const OWNED_READ_HANDOFF_MIN_BYTES: usize = STREAM_READ_BUFFER_SIZE / 2;
 const TLS_WORKER_STACK_SIZE: usize = 256 * 1024;
+const DEFAULT_MAX_PENDING_TLS_HANDSHAKES: usize = 256;
+
+fn max_pending_tls_handshakes() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("RSLOOP_MAX_PENDING_TLS_HANDSHAKES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_PENDING_TLS_HANDSHAKES)
+    })
+}
+
+fn max_write_buffer_size() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("RSLOOP_MAX_WRITE_BUFFER_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_WRITE_BUFFER_SIZE)
+    })
+}
 
 // After a successful read on a blocking reader worker, retry non-blocking
 // reads for this long before falling back to poll(). Request/response peers
@@ -376,6 +404,7 @@ struct StreamTransportState {
     lazy_socket_family: Option<i32>,
     closing: bool,
     read_paused: bool,
+    read_backpressured: bool,
     reading: bool,
     writable: bool,
     write_eof_requested: bool,
@@ -413,6 +442,7 @@ pub struct StreamTransportCore {
     loop_obj: Py<PyAny>,
     state: Mutex<StreamTransportState>,
     pending_read_events: Mutex<VecDeque<PendingReadEvent>>,
+    pending_read_bytes: AtomicUsize,
     read_events_scheduled: AtomicBool,
     reading: AtomicBool,
     writer_tx: Sender<WriterCommand>,
@@ -429,6 +459,7 @@ pub struct StreamTransportCore {
     // closing, so a paused reader worker resumes immediately instead of
     // sleeping through a poll interval.
     state_cv: Condvar,
+    read_state_notify: AsyncEvent,
     // The extra map is fixed at construction; cache the text-mode marker so
     // the per-write hot path avoids a state lock plus hash lookup.
     has_text_encoding: bool,
@@ -455,9 +486,30 @@ pub struct ServerCore {
     accept_tasks: Mutex<Vec<WorkerThread>>,
     accept_fds: Mutex<Vec<fd_ops::RawFd>>,
     active_connections: AtomicUsize,
+    pending_tls_handshakes: AtomicUsize,
+    tls_overload_reported: AtomicBool,
     closed_notify: AsyncEvent,
     cleanup_path: Option<PathBuf>,
     tls: Option<Arc<ServerTlsSettings>>,
+}
+
+struct PendingTlsHandshake {
+    server: Arc<ServerCore>,
+}
+
+impl Drop for PendingTlsHandshake {
+    fn drop(&mut self) {
+        let previous = self
+            .server
+            .pending_tls_handshakes
+            .fetch_sub(1, Ordering::AcqRel);
+        if previous.saturating_sub(1) < max_pending_tls_handshakes() / 2 {
+            self.server
+                .tls_overload_reported
+                .store(false, Ordering::Release);
+        }
+        self.server.closed_notify.notify_all();
+    }
 }
 
 #[pyclass(name = "Server", module = "rsloop._loop")]
@@ -800,10 +852,14 @@ struct WorkerThread {
     stop: Arc<AtomicBool>,
     wake: Option<Box<dyn FnOnce() + Send>>,
     join: thread::JoinHandle<()>,
+    done_rx: Receiver<()>,
 }
 
 impl WorkerThread {
-    fn spawn(name: &'static str, task: impl FnOnce(Arc<AtomicBool>) + Send + 'static) -> Self {
+    fn spawn(
+        name: &'static str,
+        task: impl FnOnce(Arc<AtomicBool>) + Send + 'static,
+    ) -> io::Result<Self> {
         Self::spawn_with_stack(name, None, task)
     }
 
@@ -811,31 +867,39 @@ impl WorkerThread {
         name: &'static str,
         stack_size: Option<usize>,
         task: impl FnOnce(Arc<AtomicBool>) + Send + 'static,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let mut builder = thread::Builder::new().name(name.to_owned());
         if let Some(stack_size) = stack_size {
             builder = builder.stack_size(stack_size);
         }
-        let join = builder
-            .spawn(move || task(thread_stop))
-            .expect("failed to spawn stream worker");
-        Self {
+        let (done_tx, done_rx) = mpsc::channel();
+        let join = builder.spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                task(thread_stop);
+            }));
+            let _ = done_tx.send(());
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        })?;
+        Ok(Self {
             stop,
             wake: None,
             join,
-        }
+            done_rx,
+        })
     }
 
     fn spawn_interruptible(
         name: &'static str,
         wake: impl FnOnce() + Send + 'static,
         task: impl FnOnce(Arc<AtomicBool>) + Send + 'static,
-    ) -> Self {
-        let mut worker = Self::spawn(name, task);
+    ) -> io::Result<Self> {
+        let mut worker = Self::spawn(name, task)?;
         worker.wake = Some(Box::new(wake));
-        worker
+        Ok(worker)
     }
 
     fn abort(mut self) {
@@ -843,7 +907,17 @@ impl WorkerThread {
         if let Some(wake) = self.wake.take() {
             wake();
         }
-        let _ = self.join.join();
+        if self.join.thread().id() == thread::current().id() {
+            return;
+        }
+        match self.done_rx.recv_timeout(WORKER_JOIN_TIMEOUT) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                let _ = self.join.join();
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                // Detach a stuck worker instead of blocking loop shutdown.
+            }
+        }
     }
 }
 
@@ -912,6 +986,18 @@ impl StreamTransportCore {
             .push(worker);
     }
 
+    fn abort_workers(&self) {
+        let workers = self
+            .workers
+            .lock()
+            .expect("poisoned transport workers")
+            .drain(..)
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.abort();
+        }
+    }
+
     fn ensure_writer_worker(self: &Arc<Self>) {
         let lazy = self
             .lazy_writer
@@ -922,7 +1008,11 @@ impl StreamTransportCore {
             return;
         };
         match target.materialize() {
-            Ok(target) => spawn_writer_worker(Arc::clone(self), target, writer_rx),
+            Ok(target) => {
+                if let Err(err) = spawn_writer_worker(Arc::clone(self), target, writer_rx) {
+                    self.fail_write(Some(err));
+                }
+            }
             Err(err) => self.fail_write(Some(io::Error::other(err.to_string()))),
         }
     }
@@ -951,10 +1041,21 @@ impl StreamTransportCore {
 
     fn enqueue_pending_read_event(self: &Arc<Self>, event: PendingReadEvent) {
         profiling::scope!("StreamTransportCore::enqueue_pending_read_event");
+        let data_len = match &event {
+            PendingReadEvent::Data(data) => data.len(),
+            _ => 0,
+        };
+        if data_len > 0 {
+            self.pending_read_bytes
+                .fetch_add(data_len, Ordering::AcqRel);
+        }
         self.pending_read_events
             .lock()
             .expect("poisoned pending read queue")
             .push_back(event);
+        if data_len > 0 {
+            self.apply_pending_read_backpressure();
+        }
 
         if !self.read_events_scheduled.swap(true, Ordering::AcqRel)
             && self
@@ -1006,6 +1107,7 @@ impl StreamTransportCore {
                 match event {
                     PendingReadEvent::Data(data) => {
                         profiling::scope!("stream.pending.data");
+                        self.record_pending_read_drained(data.len());
                         drained_events += 1;
                         drained_bytes += data.len();
                         if let Some(fast_path) = fast_path.as_ref() {
@@ -1182,6 +1284,42 @@ impl StreamTransportCore {
 }
 
 impl StreamTransportCore {
+    fn apply_pending_read_backpressure(&self) {
+        if self.pending_read_bytes.load(Ordering::Acquire) < PENDING_READ_HIGH_WATER {
+            return;
+        }
+        let mut state = self.state.lock().expect("poisoned transport state");
+        if state.read_backpressured || state.closing {
+            return;
+        }
+        state.read_backpressured = true;
+        state.reading = false;
+        self.reading.store(false, Ordering::Release);
+    }
+
+    fn record_pending_read_drained(&self, len: usize) {
+        let remaining = self
+            .pending_read_bytes
+            .fetch_sub(len, Ordering::AcqRel)
+            .saturating_sub(len);
+        if remaining > PENDING_READ_LOW_WATER {
+            return;
+        }
+        let mut state = self.state.lock().expect("poisoned transport state");
+        if !state.read_backpressured {
+            return;
+        }
+        state.read_backpressured = false;
+        state.reading = !state.read_paused && !state.closing;
+        let reading = state.reading;
+        drop(state);
+        self.reading.store(reading, Ordering::Release);
+        if reading {
+            self.state_cv.notify_all();
+            self.read_state_notify.notify_all();
+        }
+    }
+
     #[inline]
     fn call_protocol_method0(
         &self,
@@ -1422,6 +1560,7 @@ impl StreamTransportCore {
             state.write_buffer.size = 0;
             state.write_buffer.protocol_paused = false;
             self.state_cv.notify_all();
+            self.read_state_notify.notify_all();
             (
                 state.callbacks.connection_lost.clone_ref(py),
                 state
@@ -1508,6 +1647,7 @@ impl StreamTransportCore {
     fn set_closing(&self) {
         self.state.lock().expect("poisoned transport state").closing = true;
         self.state_cv.notify_all();
+        self.read_state_notify.notify_all();
     }
 
     fn runtime_socket_fd(&self) -> Option<fd_ops::RawFd> {
@@ -1529,6 +1669,7 @@ impl StreamTransportCore {
         drop(state);
         self.reading.store(false, Ordering::Release);
         self.state_cv.notify_all();
+        self.read_state_notify.notify_all();
     }
 
     fn is_closing_or_lost(&self) -> bool {
@@ -1564,10 +1705,14 @@ impl StreamTransportCore {
     fn resume_reading(&self) {
         let mut state = self.state.lock().expect("poisoned transport state");
         state.read_paused = false;
-        state.reading = true;
+        state.reading = !state.read_backpressured && !state.closing;
+        let reading = state.reading;
         drop(state);
-        self.reading.store(true, Ordering::Release);
-        self.state_cv.notify_all();
+        self.reading.store(reading, Ordering::Release);
+        if reading {
+            self.state_cv.notify_all();
+            self.read_state_notify.notify_all();
+        }
     }
 
     fn is_reading(&self) -> bool {
@@ -1576,7 +1721,7 @@ impl StreamTransportCore {
 
     fn wait_until_readable(&self) {
         let mut state = self.state.lock().expect("poisoned transport state");
-        while state.read_paused && !state.closing {
+        while (state.read_paused || state.read_backpressured) && !state.closing {
             // The timeout is only a backstop against missed notifications;
             // resume_reading()/set_closing() wake the worker immediately.
             let (guard, _) = self
@@ -1584,6 +1729,19 @@ impl StreamTransportCore {
                 .wait_timeout(state, Duration::from_millis(50))
                 .expect("poisoned transport state");
             state = guard;
+        }
+    }
+
+    async fn wait_until_async_readable(&self) {
+        loop {
+            if self.is_closing() || self.is_reading() {
+                return;
+            }
+            let wait = self.read_state_notify.listen();
+            if self.is_closing() || self.is_reading() {
+                return;
+            }
+            let _ = wait.await;
         }
     }
 
@@ -1725,7 +1883,7 @@ impl StreamTransportCore {
     }
 
     fn queue_write(self: &Arc<Self>, data: OwnedWriteBuffer) -> io::Result<()> {
-        let should_pause = self.record_write_buffer_enqueued(data.remaining().len());
+        let should_pause = self.record_write_buffer_enqueued(data.remaining().len())?;
         self.ensure_writer_worker();
         if should_pause {
             self.notify_pause_writing();
@@ -1750,7 +1908,7 @@ impl StreamTransportCore {
             return Ok(());
         }
 
-        let should_pause = self.record_write_buffer_enqueued(data.len());
+        let should_pause = self.record_write_buffer_enqueued(data.len())?;
         self.pending_direct_write
             .lock()
             .expect("poisoned pending direct write")
@@ -1923,16 +2081,9 @@ impl StreamTransportCore {
         self.detach_underlying_stream(py);
         let _ = self.writer_tx.send(WriterCommand::Stop);
         if let Some(fd) = self.runtime_socket_fd() {
-            stop_socket_reader(self, fd);
+            stop_socket_reader(self, fd).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
         }
-        for worker in self
-            .workers
-            .lock()
-            .expect("poisoned transport workers")
-            .drain(..)
-        {
-            worker.abort();
-        }
+        self.abort_workers();
 
         #[allow(unused_variables)]
         let family = socket.bind(py).getattr("family")?.extract::<i32>()?;
@@ -2008,21 +2159,30 @@ impl StreamTransportCore {
         self.enqueue_pending_read_event(PendingReadEvent::ResumeWriting);
     }
 
-    fn record_write_buffer_enqueued(&self, len: usize) -> bool {
+    fn record_write_buffer_enqueued(&self, len: usize) -> io::Result<bool> {
         if len == 0 {
-            return false;
+            return Ok(false);
         }
 
         let mut state = self.state.lock().expect("poisoned transport state");
+        if len > max_write_buffer_size().saturating_sub(state.write_buffer.size) {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                format!(
+                    "transport write buffer exceeds {} bytes",
+                    max_write_buffer_size()
+                ),
+            ));
+        }
         state.write_buffer.size = state.write_buffer.size.saturating_add(len);
         if state.write_buffer.size > state.write_buffer.high_water
             && !state.write_buffer.protocol_paused
         {
             state.write_buffer.protocol_paused = true;
-            return true;
+            return Ok(true);
         }
 
-        false
+        Ok(false)
     }
 
     fn record_write_buffer_drained(self: &Arc<Self>, len: usize) {
@@ -2117,6 +2277,21 @@ impl ServerCore {
     fn connection_lost(&self) {
         self.active_connections.fetch_sub(1, Ordering::SeqCst);
         self.closed_notify.notify_all();
+    }
+
+    fn reserve_tls_handshake(self: &Arc<Self>) -> Option<PendingTlsHandshake> {
+        if self.is_closed() {
+            return None;
+        }
+        let limit = max_pending_tls_handshakes();
+        let reserved = self.pending_tls_handshakes.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| (current < limit).then_some(current + 1),
+        );
+        reserved.ok().map(|_| PendingTlsHandshake {
+            server: Arc::clone(self),
+        })
     }
 
     fn close(&self) {
@@ -2216,7 +2391,13 @@ impl ServerCore {
                         )
                     }
                 };
-                tasks.push(task);
+                match task {
+                    Ok(task) => tasks.push(task),
+                    Err(err) => self.report_error(
+                        PyRuntimeError::new_err(err.to_string()),
+                        "failed to spawn server accept worker",
+                    ),
+                }
             }
             return;
         }
@@ -2307,7 +2488,7 @@ impl PyStreamTransport {
         self.core.flush_pending_direct_write();
         self.core.set_closing();
         if let Some(fd) = self.core.runtime_socket_fd() {
-            stop_socket_reader(&self.core, fd);
+            let _ = stop_socket_reader(&self.core, fd);
         }
         if self.core.direct_writer.is_none() {
             let _ = self.core.writer_tx.send(WriterCommand::Close);
@@ -2331,7 +2512,7 @@ impl PyStreamTransport {
         self.core.discard_pending_direct_write();
         self.core.set_closing();
         if let Some(fd) = self.core.runtime_socket_fd() {
-            stop_socket_reader(&self.core, fd);
+            let _ = stop_socket_reader(&self.core, fd);
         }
         if self.core.direct_writer.is_none() {
             let _ = self.core.writer_tx.send(WriterCommand::Abort);
@@ -2458,11 +2639,17 @@ impl PyServer {
         let core = Arc::clone(&self.core);
         pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
             loop {
-                if core.is_closed() && core.active_connections.load(Ordering::SeqCst) == 0 {
+                if core.is_closed()
+                    && core.active_connections.load(Ordering::SeqCst) == 0
+                    && core.pending_tls_handshakes.load(Ordering::Acquire) == 0
+                {
                     return Ok(Python::attach(|py| py.None()));
                 }
                 let wait = core.closed_notify.listen();
-                if core.is_closed() && core.active_connections.load(Ordering::SeqCst) == 0 {
+                if core.is_closed()
+                    && core.active_connections.load(Ordering::SeqCst) == 0
+                    && core.pending_tls_handshakes.load(Ordering::Acquire) == 0
+                {
                     return Ok(Python::attach(|py| py.None()));
                 }
                 let _ = wait.await;
@@ -2659,8 +2846,14 @@ pub fn spawn_read_pipe_transport(
         PipeTransportMode::Read,
     )?;
     core.connection_made(transport.clone_ref(py))?;
-    spawn_reader_worker(Arc::clone(&core), ReaderTarget::File(file));
-    spawn_writer_worker(core, WriterTarget::Sink(io::sink()), writer_rx);
+    if let Err(err) = spawn_reader_worker(Arc::clone(&core), ReaderTarget::File(file)) {
+        return Err(fail_transport_worker_start(py, &core, err));
+    }
+    if let Err(err) =
+        spawn_writer_worker(Arc::clone(&core), WriterTarget::Sink(io::sink()), writer_rx)
+    {
+        return Err(fail_transport_worker_start(py, &core, err));
+    }
     Ok(transport)
 }
 
@@ -2678,7 +2871,9 @@ pub fn spawn_write_pipe_transport(
         PipeTransportMode::Write,
     )?;
     core.connection_made(transport.clone_ref(py))?;
-    spawn_writer_worker(core, WriterTarget::File(file), writer_rx);
+    if let Err(err) = spawn_writer_worker(Arc::clone(&core), WriterTarget::File(file), writer_rx) {
+        return Err(fail_transport_worker_start(py, &core, err));
+    }
     Ok(transport)
 }
 
@@ -2742,6 +2937,7 @@ fn stream_transport_state_parts(
             lazy_socket_family: config.lazy_socket_family,
             closing: false,
             read_paused: false,
+            read_backpressured: false,
             reading: config.reading,
             writable: config.writable,
             write_eof_requested: false,
@@ -2775,6 +2971,7 @@ fn new_stream_transport_core(
         loop_obj: parts.loop_obj,
         state: Mutex::new(parts.state),
         pending_read_events: Mutex::new(VecDeque::new()),
+        pending_read_bytes: AtomicUsize::new(0),
         read_events_scheduled: AtomicBool::new(false),
         reading: AtomicBool::new(reading),
         writer_tx,
@@ -2788,6 +2985,7 @@ fn new_stream_transport_core(
         lazy_writer: Mutex::new(lazy_writer),
         workers: Mutex::new(Vec::new()),
         state_cv: Condvar::new(),
+        read_state_notify: AsyncEvent::new(),
         has_text_encoding,
         server_side,
         #[cfg(windows)]
@@ -2977,8 +3175,13 @@ pub fn spawn_tcp_transport(
         server.connection_opened();
     }
 
-    spawn_socket_reader(raw_fd, Arc::clone(&core), ReaderTarget::Tcp(stream))
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    if let Err(err) = spawn_socket_reader(raw_fd, Arc::clone(&core), ReaderTarget::Tcp(stream)) {
+        return Err(fail_transport_worker_start(
+            py,
+            &core,
+            io::Error::other(err.to_string()),
+        ));
+    }
     Ok(transport)
 }
 
@@ -3026,8 +3229,13 @@ pub fn spawn_unix_transport(
         server.connection_opened();
     }
 
-    spawn_socket_reader(raw_fd, Arc::clone(&core), ReaderTarget::Unix(stream))
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    if let Err(err) = spawn_socket_reader(raw_fd, Arc::clone(&core), ReaderTarget::Unix(stream)) {
+        return Err(fail_transport_worker_start(
+            py,
+            &core,
+            io::Error::other(err.to_string()),
+        ));
+    }
     Ok(transport)
 }
 
@@ -3142,15 +3350,22 @@ fn spawn_tls_transport(
         server,
         call_connection_made,
     } = config;
-    let extra = tls_stream_extra(py, &stream, extra_tls)?;
+    let handshake_server = server.clone();
     let callbacks = build_protocol_callbacks(py, &spawn_context.protocol)?;
     spawn_context.context_needs_run &= callbacks.stream_reader_fast_path.is_none();
     let (writer_tx, writer_rx) = mpsc::channel();
     let stream_fd = stream.fd();
     let tls_state = tls_io_state(stream, connection, shutdown_timeout);
 
-    py.detach(|| complete_tls_handshake(&tls_state, handshake_timeout))
+    py.detach(|| complete_tls_handshake(&tls_state, handshake_timeout, handshake_server.as_ref()))
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    if tls_server_closed(handshake_server.as_ref()) {
+        return Err(PyRuntimeError::new_err("TLS handshake cancelled"));
+    }
+    let extra = {
+        let state = tls_state.lock().expect("poisoned tls state");
+        tls_stream_extra(py, &state.stream, extra_tls)?
+    };
 
     let parts = stream_transport_state_parts(
         spawn_context,
@@ -3177,9 +3392,25 @@ fn spawn_tls_transport(
         server.connection_opened();
     }
 
-    spawn_tls_reader_worker(Arc::clone(&core), Arc::clone(&tls_state));
-    spawn_tls_writer_worker(core, tls_state, writer_rx);
+    if let Err(err) = spawn_tls_reader_worker(Arc::clone(&core), Arc::clone(&tls_state)) {
+        return Err(fail_transport_worker_start(py, &core, err));
+    }
+    if let Err(err) = spawn_tls_writer_worker(Arc::clone(&core), tls_state, writer_rx) {
+        return Err(fail_transport_worker_start(py, &core, err));
+    }
     Ok(transport)
+}
+
+fn fail_transport_worker_start(
+    py: Python<'_>,
+    core: &Arc<StreamTransportCore>,
+    err: io::Error,
+) -> PyErr {
+    let message = err.to_string();
+    core.set_closing();
+    core.abort_workers();
+    let _ = core.connection_lost_with_py(py, Some(PyRuntimeError::new_err(message.clone())));
+    PyRuntimeError::new_err(message)
 }
 
 pub fn create_server(py: Python<'_>, params: ServerCreateParams) -> PyResult<Py<PyServer>> {
@@ -3214,6 +3445,8 @@ pub fn create_server(py: Python<'_>, params: ServerCreateParams) -> PyResult<Py<
                 accept_tasks: Mutex::new(accept_tasks),
                 accept_fds: Mutex::new(Vec::new()),
                 active_connections: AtomicUsize::new(0),
+                pending_tls_handshakes: AtomicUsize::new(0),
+                tls_overload_reported: AtomicBool::new(false),
                 closed_notify: AsyncEvent::new(),
                 cleanup_path,
                 tls,
@@ -3365,12 +3598,30 @@ pub(crate) fn spawn_accepted_transport_with_py(
 
 fn schedule_accepted_transport(server: &Arc<ServerCore>, stream: AcceptedStream, message: &str) {
     if server.tls.is_some() {
+        let Some(pending) = server.reserve_tls_handshake() else {
+            if !server.is_closed() && !server.tls_overload_reported.swap(true, Ordering::AcqRel) {
+                server.report_error(
+                    PyRuntimeError::new_err(format!(
+                        "pending TLS handshake limit ({}) reached",
+                        max_pending_tls_handshakes()
+                    )),
+                    "TLS server is overloaded",
+                );
+            }
+            return;
+        };
         let server = Arc::clone(server);
         let message = message.to_owned();
         drop(async_std::task::spawn_blocking(move || {
+            let _pending = pending;
+            if server.is_closed() {
+                return;
+            }
             let result =
                 Python::try_attach(|py| spawn_accepted_transport_with_py(py, &server, stream));
-            if let Some(Err(err)) = result {
+            if let Some(Err(err)) = result
+                && !server.is_closed()
+            {
                 server.report_error(err, &message);
             }
         }));
@@ -3626,55 +3877,76 @@ async fn run_unix_accept_task(server: Arc<ServerCore>, listener: StdUnixListener
     }
 }
 
-fn spawn_reader_worker(core: Arc<StreamTransportCore>, reader: ReaderTarget) {
+fn spawn_reader_worker(core: Arc<StreamTransportCore>, reader: ReaderTarget) -> io::Result<()> {
     let thread_core = Arc::clone(&core);
     let worker = WorkerThread::spawn("rsloop-stream-reader", move |stop| {
         run_stream_reader(thread_core, reader, stop)
-    });
+    })?;
     core.register_worker(worker);
+    Ok(())
 }
 
-fn spawn_tls_reader_worker(core: Arc<StreamTransportCore>, tls_state: SharedTlsIoState) {
+fn spawn_tls_reader_worker(
+    core: Arc<StreamTransportCore>,
+    tls_state: SharedTlsIoState,
+) -> io::Result<()> {
     let thread_core = Arc::clone(&core);
     let worker = WorkerThread::spawn_with_stack(
         "rsloop-tls-reader",
         Some(TLS_WORKER_STACK_SIZE),
         move |stop| run_tls_reader(thread_core, tls_state, stop),
-    );
+    )?;
     core.register_worker(worker);
+    Ok(())
 }
 
 fn spawn_writer_worker(
     core: Arc<StreamTransportCore>,
     writer: WriterTarget,
     writer_rx: Receiver<WriterCommand>,
-) {
+) -> io::Result<()> {
     profiling::scope!("stream.spawn_writer_worker");
     let thread_core = Arc::clone(&core);
     let worker = WorkerThread::spawn("rsloop-stream-writer", move |stop| {
         run_stream_writer(thread_core, writer, writer_rx, stop)
-    });
+    })?;
     core.register_worker(worker);
+    Ok(())
 }
 
 fn spawn_tls_writer_worker(
     core: Arc<StreamTransportCore>,
     tls_state: SharedTlsIoState,
     writer_rx: Receiver<WriterCommand>,
-) {
+) -> io::Result<()> {
     let thread_core = Arc::clone(&core);
     let worker = WorkerThread::spawn_with_stack(
         "rsloop-tls-writer",
         Some(TLS_WORKER_STACK_SIZE),
         move |stop| run_tls_writer(thread_core, tls_state, writer_rx, stop),
-    );
+    )?;
     core.register_worker(worker);
+    Ok(())
 }
 
-fn complete_tls_handshake(tls_state: &SharedTlsIoState, timeout: Duration) -> io::Result<()> {
+fn tls_server_closed(server: Option<&Weak<ServerCore>>) -> bool {
+    server.is_some_and(|server| server.upgrade().is_none_or(|server| server.is_closed()))
+}
+
+fn complete_tls_handshake(
+    tls_state: &SharedTlsIoState,
+    timeout: Duration,
+    server: Option<&Weak<ServerCore>>,
+) -> io::Result<()> {
     profiling::scope!("stream.complete_tls_handshake");
     let deadline = std::time::Instant::now() + timeout;
     loop {
+        if tls_server_closed(server) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "TLS handshake cancelled",
+            ));
+        }
         if std::time::Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -3719,7 +3991,9 @@ fn continue_tls_handshake_read(
     fd: fd_ops::RawFd,
     pollable: bool,
 ) -> io::Result<()> {
-    wait_socket_ready(fd, pollable, true, false)?;
+    if !wait_socket_ready_once(fd, pollable, true, false)? {
+        return Ok(());
+    }
     let mut state = tls_state.lock().expect("poisoned tls state");
     let n = state.read_tls()?;
     if n == 0 && state.connection.is_handshaking() {
@@ -3956,21 +4230,20 @@ fn spawn_socket_reader(
 
 /// Stops the socket reader for `fd` via the runtime-thread command path (readers
 /// are hosted there; see `spawn_socket_reader`).
-fn stop_socket_reader(core: &StreamTransportCore, fd: fd_ops::RawFd) {
+fn stop_socket_reader(core: &StreamTransportCore, fd: fd_ops::RawFd) -> io::Result<()> {
     let (done_tx, done_rx) = mpsc::channel();
-    if core
-        .loop_core
+    core.loop_core
         .send_command(LoopCommand::Io(LoopIoCommand::StopSocketReader {
             fd,
             done_tx,
         }))
-        .is_ok()
-    {
-        // start_tls duplicates the socket before reaching this point. Do not
-        // let the TLS handshake use that duplicate until the runtime-thread
-        // reader has been dropped, otherwise it can consume handshake bytes.
-        let _ = done_rx.recv();
-    }
+        .map_err(io::Error::other)?;
+    // start_tls duplicates the socket before reaching this point. Do not let
+    // the TLS handshake use that duplicate until the runtime-thread reader has
+    // been dropped, otherwise it can consume handshake bytes.
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))
 }
 
 #[cfg(not(windows))]
@@ -3998,9 +4271,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
             return;
         }
 
-        while !core.is_closing() && !core.is_reading() {
-            vibeio::time::sleep(Duration::from_millis(1)).await;
-        }
+        core.wait_until_async_readable().await;
         if core.is_closing() {
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
@@ -4074,9 +4345,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
         }
-        while !core.is_closing() && !core.is_reading() {
-            vibeio::time::sleep(Duration::from_millis(1)).await;
-        }
+        core.wait_until_async_readable().await;
         if core.is_closing() {
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
@@ -4175,9 +4444,7 @@ async fn run_windows_poll_tcp_reader(
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
         }
-        while !core.is_closing() && !core.is_reading() {
-            vibeio::time::sleep(Duration::from_millis(1)).await;
-        }
+        core.wait_until_async_readable().await;
         if core.is_closing() {
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
@@ -4227,9 +4494,7 @@ pub(crate) async fn run_unix_socket_reader_task(
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
         }
-        while !core.is_closing() && !core.is_reading() {
-            vibeio::time::sleep(Duration::from_millis(1)).await;
-        }
+        core.wait_until_async_readable().await;
         if core.is_closing() {
             core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
             return;
@@ -4257,10 +4522,23 @@ pub(crate) async fn run_unix_socket_reader_task(
 }
 
 fn take_async_read_data(buf: &mut Vec<u8>) -> Vec<u8> {
+    let capacity = buf.capacity().max(STREAM_READ_BUFFER_SIZE);
+    let next_capacity = if buf.len() == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
+        (capacity * 2).min(MAX_STREAM_READ_BUFFER_SIZE)
+    } else if capacity > STREAM_READ_BUFFER_SIZE && buf.len() < capacity / 4 {
+        (capacity / 2).max(STREAM_READ_BUFFER_SIZE)
+    } else {
+        capacity
+    };
+
     if buf.len() < OWNED_READ_HANDOFF_MIN_BYTES {
-        return buf.clone();
+        let data = buf.clone();
+        if next_capacity != capacity {
+            *buf = Vec::with_capacity(next_capacity);
+        }
+        return data;
     }
-    std::mem::replace(buf, Vec::with_capacity(STREAM_READ_BUFFER_SIZE))
+    std::mem::replace(buf, Vec::with_capacity(next_capacity))
 }
 
 pub(crate) fn run_socket_reader_blocking(
@@ -4676,6 +4954,20 @@ fn wait_socket_ready(fd: fd_ops::RawFd, pollable: bool, read: bool, write: bool)
 
     thread::sleep(Duration::from_millis(10));
     Ok(())
+}
+
+fn wait_socket_ready_once(
+    fd: fd_ops::RawFd,
+    pollable: bool,
+    read: bool,
+    write: bool,
+) -> io::Result<bool> {
+    if pollable {
+        return fd_ops::poll_fd(fd, read, write, BLOCKING_POLL_INTERVAL_MS)
+            .map(|(read_ready, write_ready)| (!read || read_ready) && (!write || write_ready));
+    }
+    thread::sleep(Duration::from_millis(10));
+    Ok(true)
 }
 
 fn poll_read_ready(fd: fd_ops::RawFd) -> io::Result<bool> {

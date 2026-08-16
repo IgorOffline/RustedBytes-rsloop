@@ -72,8 +72,9 @@ uv run --with uvloop python benchmarks/compare_event_loops.py --no-rsloop-fast-s
 ## Representative workload matrix
 
 [`workload_matrix.py`](./workload_matrix.py) complements the microbenchmarks
-with concurrent, production-shaped network traffic. It runs each loop and
-scenario in a fresh subprocess and reports throughput, transferred MiB/s,
+with concurrent, production-shaped network traffic. By default, each
+loop/scenario pair gets one subprocess so warmups populate the same process
+caches used by measured runs. It reports total and traffic-only throughput,
 p50/p95/p99 operation latency, and peak RSS.
 
 The scenarios are:
@@ -114,6 +115,8 @@ uv run --with uvloop python benchmarks/workload_matrix.py \
 ```
 
 Use `--json-output benchmarks/results/matrix.json` to retain raw measurements.
+Pass `--measurement-mode cold` to put every warmup and measured run in a fresh
+process when startup cost is the subject of the comparison.
 TLS uses the test certificates under `tests/fixtures/tls`; regenerate them
 cross-platform when needed with:
 
