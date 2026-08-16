@@ -57,6 +57,8 @@ This directory shows the supported feature areas in runnable form.
 - pipes
 - signals
 - subprocesses
+- a FastAPI service for comparing stdlib `asyncio`, `uvloop`, and `rsloop`
+- WebSocket examples
 
 Examples are a good first stop before reading tests.
 
@@ -71,18 +73,6 @@ The tests tell you what behavior the project promises today.
 - `test_tls.py`: TLS-related behavior
 
 When you are unsure whether a feature is expected to work, check the tests.
-
-## Demo
-
-Path: `demo/`
-
-This is an example FastAPI service used to compare event loops in a more realistic application.
-
-It is helpful when you want to:
-
-- see `rsloop` in a web-service shape
-- compare it with stdlib `asyncio` and `uvloop`
-- exercise the fast stream path
 
 ## Benchmarks
 

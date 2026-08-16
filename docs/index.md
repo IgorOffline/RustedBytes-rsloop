@@ -56,7 +56,7 @@ At a high level, the repository has five parts:
 2. The Rust extension in `src/`
 3. Example programs in `examples/`
 4. Tests in `tests/`
-5. Utility material such as `demo/`, `benchmarks/`, and `scripts/`
+5. Utility material such as `benchmarks/` and `scripts/`
 
 The rest of the docs explain each part in plain language.
 

@@ -1,12 +1,12 @@
-# FastAPI Demo
+# FastAPI Example
 
-This demo runs the same FastAPI service on three event loops:
+This example runs the same FastAPI service on three event loops:
 
 - stdlib `asyncio`
 - `uvloop`
 - `rsloop`
 
-When started with `--event-loop rsloop`, the demo explicitly enables
+When started with `--event-loop rsloop`, the example explicitly enables
 `rsloop` fast streams before importing the loop implementation.
 
 ## Prerequisites
@@ -17,7 +17,7 @@ If the Rust extension is not already built locally:
 uv run --with maturin maturin develop --release
 ```
 
-The demo itself uses temporary dependencies from `uv`, so nothing needs to be
+The example uses temporary dependencies from `uv`, so nothing needs to be
 added to the project package metadata.
 
 ## Run
@@ -25,17 +25,17 @@ added to the project package metadata.
 From the repository root:
 
 ```bash
-uv run --with fastapi --with uvicorn python demo/fastapi_service.py --event-loop asyncio --no-access-log
-uv run --with fastapi --with uvicorn --with uvloop python demo/fastapi_service.py --event-loop uvloop --no-access-log
-uv run --with fastapi --with uvicorn python demo/fastapi_service.py --event-loop rsloop --no-access-log
+uv run --with fastapi --with uvicorn python examples/fastapi_service.py --event-loop asyncio --no-access-log
+uv run --with fastapi --with uvicorn --with uvloop python examples/fastapi_service.py --event-loop uvloop --no-access-log
+uv run --with fastapi --with uvicorn python examples/fastapi_service.py --event-loop rsloop --no-access-log
 ```
 
-Service entrypoint: [`demo/fastapi_service.py`](./fastapi_service.py)
+Service entrypoint: [`examples/fastapi_service.py`](./fastapi_service.py)
 
 `std-async` is also accepted as an alias for stdlib `asyncio`:
 
 ```bash
-uv run --with fastapi --with uvicorn --with uvloop python demo/fastapi_service.py --event-loop std-async
+uv run --with fastapi --with uvicorn --with uvloop python examples/fastapi_service.py --event-loop std-async
 ```
 
 ## Endpoints

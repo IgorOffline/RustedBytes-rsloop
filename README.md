@@ -337,7 +337,7 @@ Example files:
 
 The repository also includes:
 
-- [`demo/fastapi_service.py`](./demo/fastapi_service.py) for running the same
+- [`examples/fastapi_service.py`](./examples/fastapi_service.py) for running the same
   FastAPI app on stdlib `asyncio`, `uvloop`, or `rsloop`
 - [`benchmarks/compare_event_loops.py`](./benchmarks/compare_event_loops.py)
   for callback, task, and TCP stream comparisons
@@ -372,8 +372,8 @@ asyncio        0.302337     0.299813         16,538     29.6 MiB        3.32x
 ```
 
 See [`benchmarks/README.md`](./benchmarks/README.md) for workload details and
-extra flags, and [`demo/README.md`](./demo/README.md) for the FastAPI loop
-comparison demo.
+extra flags, and [`examples/README.md`](./examples/README.md) for the FastAPI
+loop comparison example.
 
 ## Acknowledgements
 

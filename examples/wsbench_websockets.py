@@ -1,5 +1,5 @@
 """
-uv run --with websockets demo/wsbench_websockets.py
+uv run --with websockets examples/wsbench_websockets.py
 """
 
 from __future__ import annotations

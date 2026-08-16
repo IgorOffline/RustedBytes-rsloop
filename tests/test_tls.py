@@ -409,7 +409,7 @@ class TlsTests(unittest.TestCase):
         "websockets package is required",
     )
     def test_wsbench_websockets_respects_cert_none_context(self) -> None:
-        from demo import wsbench_websockets
+        from examples import wsbench_websockets
         from websockets import serve
 
         async def main() -> list[tuple[str, str]]:
