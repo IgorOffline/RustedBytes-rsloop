@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       python_versions:
-        description: "Space-separated Python versions to test"
+        description: "Space-separated supported Python versions to test (3.10–3.14, plus 3.14t)"
         required: false
         type: string
       build_mode:
@@ -49,6 +49,16 @@ jobs:
           import json
           import os
           import sys
+
+          supported_versions = {"3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"}
+          unsupported_versions = sorted(set(sys.argv[1:]) - supported_versions)
+          if unsupported_versions:
+              raise SystemExit(
+                  "Unsupported Python version(s): "
+                  + ", ".join(unsupported_versions)
+                  + ". Supported versions: "
+                  + ", ".join(sorted(supported_versions))
+              )
 
           oses = [
               {"os_name": "linux", "runner": "ubuntu-latest"},

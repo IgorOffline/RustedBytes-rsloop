@@ -340,9 +340,10 @@ else:
                         write_done.set_result(None)
 
             r_fd, w_fd = os.pipe()
-            with os.fdopen(r_fd, "rb", buffering=0) as rfile, os.fdopen(
-                w_fd, "wb", buffering=0
-            ) as wfile:
+            with (
+                os.fdopen(r_fd, "rb", buffering=0) as rfile,
+                os.fdopen(w_fd, "wb", buffering=0) as wfile,
+            ):
                 read_transport, _ = await loop.connect_read_pipe(ReadProtocol, rfile)
                 wfile.write(b"pipe-read-demo")
                 wfile.flush()
@@ -351,9 +352,10 @@ else:
                 read_transport.close()
 
             r_fd2, w_fd2 = os.pipe()
-            with os.fdopen(r_fd2, "rb", buffering=0) as rfile2, os.fdopen(
-                w_fd2, "wb", buffering=0
-            ) as wfile2:
+            with (
+                os.fdopen(r_fd2, "rb", buffering=0) as rfile2,
+                os.fdopen(w_fd2, "wb", buffering=0) as wfile2,
+            ):
                 write_transport, _ = await loop.connect_write_pipe(
                     WriteProtocol, wfile2
                 )
@@ -416,9 +418,10 @@ else:
                     self.transport.close()
 
             r_fd, w_fd = os.pipe()
-            with os.fdopen(r_fd, "rb", buffering=0) as rfile, os.fdopen(
-                w_fd, "wb", buffering=0
-            ) as wfile:
+            with (
+                os.fdopen(r_fd, "rb", buffering=0) as rfile,
+                os.fdopen(w_fd, "wb", buffering=0) as wfile,
+            ):
                 read_task = asyncio.create_task(
                     run_in_thread(drain_pipe, rfile.fileno(), len(payload))
                 )

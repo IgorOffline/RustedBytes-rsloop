@@ -92,9 +92,10 @@ async def demo_pipes() -> None:
 
     r_fd, w_fd = os.pipe()
     read_done: asyncio.Future[str] = loop.create_future()
-    with os.fdopen(r_fd, "rb", buffering=0) as rfile, os.fdopen(
-        w_fd, "wb", buffering=0
-    ) as wfile:
+    with (
+        os.fdopen(r_fd, "rb", buffering=0) as rfile,
+        os.fdopen(w_fd, "wb", buffering=0) as wfile,
+    ):
         transport, _ = await loop.connect_read_pipe(
             lambda: ReadPipeProtocol(read_done), rfile
         )
@@ -107,9 +108,10 @@ async def demo_pipes() -> None:
     payload = b"pipe-write-demo"
     r_fd2, w_fd2 = os.pipe()
     write_done: asyncio.Future[None] = loop.create_future()
-    with os.fdopen(r_fd2, "rb", buffering=0) as rfile2, os.fdopen(
-        w_fd2, "wb", buffering=0
-    ) as wfile2:
+    with (
+        os.fdopen(r_fd2, "rb", buffering=0) as rfile2,
+        os.fdopen(w_fd2, "wb", buffering=0) as wfile2,
+    ):
         transport, _ = await loop.connect_write_pipe(
             lambda: WritePipeProtocol(write_done, payload),
             wfile2,

@@ -166,7 +166,9 @@ import asyncio
 import rsloop
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def handle_client(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
     data = await reader.read(100)
     writer.write(data.upper())
     await writer.drain()

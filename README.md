@@ -22,7 +22,7 @@ The package exposes:
 - `rsloop.Loop`, `rsloop.EventLoopPolicy`, `rsloop.new_event_loop()`,
   `rsloop.run(...)`, `rsloop.install()`, and `rsloop.uninstall()`
 
-Repository metadata currently targets Python `>=3.8`. 
+Repository metadata currently targets Python `>=3.10`.
 
 ## Documentation
 
@@ -68,8 +68,9 @@ Simple entry point:
 ```python
 import rsloop
 
-async def main():
-    ...
+
+async def main(): ...
+
 
 rsloop.run(main())
 ```
@@ -102,7 +103,7 @@ finally:
     loop.close()
 ```
 
-Importing `rsloop` also patches `asyncio.set_event_loop()` so Python 3.8 can
+Importing `rsloop` also patches `asyncio.set_event_loop()` so Python 3.10 can
 accept an `rsloop.Loop` instance, matching the behavior exercised by
 [`tests/test_run.py`](./tests/test_run.py).
 
@@ -266,7 +267,7 @@ scripts/build-wheels.sh
 ```
 
 [`scripts/build-wheels.sh`](./scripts/build-wheels.sh) currently defaults to
-CPython `3.8 3.9 3.10 3.11 3.12 3.13 3.14` plus free-threaded `3.14t`, and
+CPython `3.10 3.11 3.12 3.13 3.14` plus free-threaded `3.14t`, and
 uses `uv python install` / `uv python find` to locate interpreters.
 
 ## Profiling

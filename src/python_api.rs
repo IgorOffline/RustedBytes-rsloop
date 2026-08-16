@@ -511,26 +511,11 @@ fn create_asyncio_task_for_loop(
 #[inline]
 fn create_asyncio_task_for_running_loop(
     py: Python<'_>,
-    loop_obj: &Bound<'_, PyAny>,
+    _loop_obj: &Bound<'_, PyAny>,
     coro: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let task_cls = asyncio_task_cls(py)?;
-    #[cfg(not(Py_3_10))]
-    {
-        // On Python 3.8/3.9, `Task.__init__` resolves the loop via the slower
-        // `get_event_loop()` when none is passed; supplying the running loop
-        // (accepted there without a deprecation warning) skips that per-task
-        // lookup — ~10% of create_task. 3.10+ resolves the running loop cheaply,
-        // so the extra kwarg would only add overhead there and is skipped.
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("loop", loop_obj)?;
-        task_cls.call(py, (coro,), Some(&kwargs))
-    }
-    #[cfg(Py_3_10)]
-    {
-        let _ = loop_obj;
-        call_callable_onearg(py, task_cls, coro.bind(py))
-    }
+    call_callable_onearg(py, task_cls, coro.bind(py))
 }
 
 fn create_asyncio_task_with_kwargs(

@@ -32,9 +32,8 @@ def __set_event_loop(loop: Loop | None) -> None:
         if loop is None or not isinstance(loop, Loop):
             raise
 
-    # Python 3.8 rejects non-stdlib loop objects in set_event_loop() with a
-    # hard isinstance() assertion. Mirror the stdlib policy bookkeeping so
-    # get_event_loop() still returns the current rsloop instance.
+    # asyncio policies accept only stdlib event-loop instances. Maintain the
+    # policy's bookkeeping so get_event_loop() returns the active rsloop.
     policy = __get_event_loop_policy()
     local = getattr(policy, "_local", None)
     if local is None:

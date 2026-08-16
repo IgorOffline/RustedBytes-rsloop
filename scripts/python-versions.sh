@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-RSLOOP_DEFAULT_PYTHON_VERSIONS=(3.8 3.9 3.10 3.11 3.12 3.13 3.14 3.14t)
+RSLOOP_DEFAULT_PYTHON_VERSIONS=(3.10 3.11 3.12 3.13 3.14 3.14t)
 
 rsloop_target_python_request() {
   local version="$1"

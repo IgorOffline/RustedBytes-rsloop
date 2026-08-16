@@ -22,7 +22,7 @@ Options:
 
 Environment:
   RSLOOP_PYTHON_VERSIONS  Space-separated version list to override the defaults
-                          (default: 3.8 3.9 3.10 3.11 3.12 3.13 3.14 3.14t)
+                          (default: 3.10 3.11 3.12 3.13 3.14 3.14t)
   RSLOOP_RUST_TARGET      Rust compilation target to pass to maturin
 
 Examples:
