@@ -1,3 +1,5 @@
+//! Translation of callback failures into `asyncio` exception-handler behavior.
+
 use pyo3::exceptions::{PyBaseException, PyException};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -11,6 +13,8 @@ pub fn handle_callback_error(
     err: PyErr,
     handle_repr: String,
 ) -> PyResult<Option<PyErr>> {
+    // Ordinary exceptions are reported to the loop handler. Control-flow
+    // exceptions such as KeyboardInterrupt must propagate out of the loop.
     if err.is_instance_of::<PyException>(py) {
         let context = PyDict::new(py);
         context.set_item("message", "Unhandled exception in event loop callback")?;

@@ -29,6 +29,7 @@ struct CachedClientConfig {
     config: Arc<ClientConfig>,
 }
 
+/// Rust TLS client state plus the original Python context exposed in extras.
 pub struct ClientTlsSettings {
     pub config: Arc<ClientConfig>,
     pub server_name: ServerName<'static>,
@@ -37,6 +38,7 @@ pub struct ClientTlsSettings {
     pub ssl_context: Py<PyAny>,
 }
 
+/// Rust TLS server state plus the original Python context exposed in extras.
 pub struct ServerTlsSettings {
     pub config: Arc<ServerConfig>,
     pub handshake_timeout: Duration,
@@ -68,6 +70,8 @@ pub fn client_tls_settings(
 }
 
 fn cached_client_config(py: Python<'_>, ssl_context: &Py<PyAny>) -> PyResult<Arc<ClientConfig>> {
+    // The Python `SSLContext` owns the capsule, so repeated connections can
+    // reuse an `Arc<ClientConfig>` until compatibility metadata changes.
     let context_dict = ssl_context.bind(py).getattr("__dict__")?;
     let context_dict = context_dict.cast::<PyDict>()?;
     let generation = context_dict

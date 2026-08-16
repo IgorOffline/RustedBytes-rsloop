@@ -1,3 +1,5 @@
+//! Optional Tracy profiler lifecycle exposed to Python.
+
 use pyo3::prelude::*;
 
 #[cfg(feature = "profiler")]

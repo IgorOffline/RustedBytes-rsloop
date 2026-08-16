@@ -1,3 +1,5 @@
+//! Interned Python method names and low-overhead method-call helpers.
+
 use std::sync::OnceLock;
 
 use pyo3::ffi;

@@ -1,3 +1,5 @@
+//! Public adapters for turning Rust futures into Python awaitables.
+
 use std::future::Future;
 
 use pyo3::prelude::*;

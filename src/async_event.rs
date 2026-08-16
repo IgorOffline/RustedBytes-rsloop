@@ -1,7 +1,10 @@
+//! Small broadcast notification primitive used by transport shutdown paths.
+
 use std::sync::Mutex;
 
 use futures::channel::oneshot;
 
+/// Registers one-shot waiters and wakes every waiter present at notification time.
 pub struct AsyncEvent {
     waiters: Mutex<Vec<oneshot::Sender<()>>>,
 }

@@ -1,3 +1,8 @@
+//! Coordination-thread dispatcher for commands, timers, and compatibility watchers.
+//!
+//! It prepares `ReadyItem`s but leaves Python callback execution to the loop
+//! thread. Direct stream I/O can instead run on the loop thread's own reactor.
+
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -21,6 +26,7 @@ use signal_hook::iterator::{Handle as SignalHandle, Signals};
 mod timer_entry;
 use timer_entry::TimerEntry;
 
+/// Long-lived future driven by the coordination thread's `vibeio` runtime.
 struct RuntimeDispatcher {
     core: Arc<LoopCore>,
     command_rx: Receiver<LoopCommand>,
@@ -36,6 +42,7 @@ struct RuntimeDispatcher {
     shutting_down: bool,
 }
 
+/// Queue shared with the Python loop thread while `run_forever` is active.
 struct ActiveRun {
     pending_ready: Arc<std::sync::Mutex<VecDeque<ReadyItem>>>,
 }
@@ -49,6 +56,7 @@ struct SignalWatcher {
 #[cfg(not(unix))]
 struct SignalWatcher;
 
+/// A watcher may be an older helper thread or a native `vibeio` task.
 enum WatchTask {
     Thread {
         stop: Arc<AtomicBool>,

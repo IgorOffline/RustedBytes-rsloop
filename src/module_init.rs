@@ -1,3 +1,5 @@
+//! Registration of Rust classes and functions in the `_loop` extension module.
+
 use pyo3::prelude::*;
 
 use crate::bindings::{

@@ -23,6 +23,7 @@ pub enum AcceptedStream {
     Unix(UnixStream),
 }
 
+/// Python and loop state carried from the binding layer into a new transport.
 pub struct TransportSpawnContext {
     pub loop_core: Arc<LoopCore>,
     pub loop_obj: Py<PyAny>,
@@ -50,6 +51,7 @@ impl TransportSpawnContext {
     }
 }
 
+/// Fully resolved inputs used to construct a `ServerCore`.
 pub struct ServerCreateParams {
     pub loop_core: Arc<LoopCore>,
     pub loop_obj: Py<PyAny>,

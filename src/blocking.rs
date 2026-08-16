@@ -1,7 +1,10 @@
+//! Adapter for blocking operations that cannot run on an async reactor thread.
+
 use std::thread;
 
 use futures::channel::oneshot;
 
+/// Runs one blocking closure on a named worker and returns its result asynchronously.
 pub async fn run<T, F>(name: impl Into<String>, task: F) -> Result<T, String>
 where
     F: FnOnce() -> T + Send + 'static,

@@ -1,3 +1,5 @@
+//! `contextvars` propagation and running-loop bookkeeping for Python callbacks.
+
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
@@ -18,6 +20,7 @@ fn set_running_loop_fn(py: Python<'_>) -> PyResult<&Py<PyAny>> {
     Ok(SET_RUNNING_LOOP_FN.get_or_init(|| loaded))
 }
 
+/// Captures the caller's context unless an explicit context was supplied.
 pub fn capture_context(py: Python<'_>, explicit: Option<Py<PyAny>>) -> PyResult<(Py<PyAny>, bool)> {
     let context = if let Some(context) = explicit {
         context
@@ -103,6 +106,8 @@ pub fn run_in_context(
         return callback.call1(py, args.clone_ref(py));
     }
 
+    // A callback may re-enter the context that is already active on this
+    // thread. `asyncio` still runs it, so only unrelated enter errors escape.
     if let Err(err) = enter_context(py, context) {
         return if is_nested_context_error(py, &err) {
             callback.call1(py, args.clone_ref(py))

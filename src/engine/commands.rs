@@ -1,3 +1,5 @@
+//! Messages exchanged by the Python loop thread, dispatcher, and I/O workers.
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -11,6 +13,7 @@ use crate::transport::stream::{
     AcceptedStream, ReaderTarget, ServerCore, ServerListener, StreamTransportCore,
 };
 
+/// Work that must be completed on the Python loop thread, usually under the GIL.
 pub enum ReadyItem {
     Callback(Arc<ReadyCallback>),
     HandleCallback(Py<PyHandle>),
@@ -43,6 +46,7 @@ pub enum ReadyItem {
     Stop,
 }
 
+/// Control-plane messages consumed by the dedicated runtime dispatcher.
 pub enum LoopCommand {
     ScheduleReady(Arc<ReadyCallback>),
     ScheduleReadyHandle(Py<PyHandle>),

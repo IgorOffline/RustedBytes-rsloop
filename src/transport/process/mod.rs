@@ -55,6 +55,8 @@ struct ProcessState {
     pipe_transports: HashMap<i32, Py<PyAny>>,
 }
 
+/// Shared subprocess owner. Worker threads enqueue `PendingProcessEvent`s;
+/// the loop thread drains them and is the only place that calls the protocol.
 pub struct ProcessTransportCore {
     loop_core: Arc<LoopCore>,
     loop_obj: Py<PyAny>,

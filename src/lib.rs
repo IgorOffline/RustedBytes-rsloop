@@ -1,3 +1,9 @@
+//! Native extension entry point and the top-level map of the Rust implementation.
+//!
+//! `bindings` exposes the Python API, `engine` schedules work, and `transport`
+//! owns network, TLS, and subprocess I/O. Platform details stay behind
+//! `platform` so the higher layers can share one event-loop model.
+
 mod async_event;
 mod bindings;
 mod blocking;

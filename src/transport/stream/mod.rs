@@ -406,6 +406,8 @@ impl Default for StreamWriteBufferState {
     }
 }
 
+/// Shared stream owner. I/O paths enqueue events; the loop thread drains them
+/// and invokes the Python protocol in order.
 pub struct StreamTransportCore {
     loop_core: Arc<LoopCore>,
     loop_obj: Py<PyAny>,
@@ -441,6 +443,7 @@ struct ServerState {
     listeners: Vec<ServerListener>,
 }
 
+/// Shared server owner for listeners, accept workers, and active connections.
 pub struct ServerCore {
     loop_core: Arc<LoopCore>,
     loop_obj: Py<PyAny>,

@@ -109,6 +109,7 @@ struct TcpServerSocketOptions {
 }
 
 #[pyclass(subclass, module = "rsloop._loop", weakref)]
+/// Python-visible event loop; scheduling and lifecycle state live in `LoopCore`.
 pub struct PyLoop {
     pub core: Arc<LoopCore>,
 }
@@ -154,6 +155,8 @@ struct AsyncgenHooksGuard {
 }
 
 impl AsyncgenHooksGuard {
+    // Install loop-specific async-generator hooks temporarily; `Drop` restores
+    // the process-wide hooks even when `run_forever` exits with an error.
     fn install(py: Python<'_>, loop_obj: &Py<PyAny>, core: &Arc<LoopCore>) -> PyResult<Self> {
         let sys = py.import("sys")?;
         let hooks = sys.call_method0("get_asyncgen_hooks")?;

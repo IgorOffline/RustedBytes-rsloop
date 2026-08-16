@@ -1,3 +1,5 @@
+//! Timer-heap entry with stable ordering for equal deadlines.
+
 use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,6 +26,8 @@ impl PartialOrd for TimerEntry {
 
 impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
+        // `BinaryHeap` is a max-heap, so reverse both keys to pop the earliest
+        // deadline first and preserve insertion order for ties.
         other
             .when
             .cmp(&self.when)

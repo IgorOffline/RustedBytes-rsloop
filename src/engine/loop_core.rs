@@ -1,3 +1,8 @@
+//! Python loop-thread state and the bridge to runtime and worker threads.
+//!
+//! `LoopCore` owns lifecycle state and ready queues. Python callbacks execute
+//! on the caller's loop thread; other threads only enqueue commands or results.
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -232,6 +237,7 @@ struct ActiveReadyDispatch {
     pending_ready: Arc<Mutex<VecDeque<ReadyItem>>>,
 }
 
+/// Mutable lifecycle and Python-facing configuration guarded by `LoopCore`.
 pub struct LoopState {
     pub closed: bool,
     pub running: bool,
@@ -270,6 +276,7 @@ impl LoopState {
     }
 }
 
+/// Shared event-loop owner used by Python bindings, the dispatcher, and transports.
 pub struct LoopCore {
     pub state: Mutex<LoopState>,
     pub start: Instant,

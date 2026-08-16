@@ -31,6 +31,7 @@ fn loop_create_future(py: Python<'_>, loop_obj: &Py<PyAny>) -> PyResult<Py<PyAny
     python_names::call_method0(py, loop_obj.bind(py), python_names::create_future(py))
 }
 
+/// Sliding buffer that delays compaction and releases unusually large bursts.
 struct ReadBuffer {
     bytes: Vec<u8>,
     start: usize,
@@ -157,6 +158,7 @@ enum ReadWaitKind {
 }
 
 struct ReadWaiter {
+    // A reader has at most one outstanding Python read operation at a time.
     future: Py<PyAny>,
     kind: ReadWaitKind,
     exact: Option<ExactReadAccumulator>,
