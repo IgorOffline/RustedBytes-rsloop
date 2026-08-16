@@ -1,4 +1,4 @@
-<img src="./rsloop.png" alt="rsloop logo" align="center">
+<img src="./docs/rsloop.png" alt="rsloop logo" align="center">
 
 # An event loop for asyncio written in Rust
 
