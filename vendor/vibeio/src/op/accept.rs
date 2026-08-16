@@ -249,7 +249,7 @@ fn set_accept_context(listener_socket: SOCKET, accepted_socket: SOCKET) -> Resul
 #[cfg(windows)]
 const ACCEPTEX_ADDR_LEN: usize = std::mem::size_of::<SOCKADDR_STORAGE>() + 16;
 #[cfg(windows)]
-const ACCEPTEX_OUTPUT_BUFFER_LEN: usize = ACCEPTEX_ADDR_LEN;
+const ACCEPTEX_OUTPUT_BUFFER_LEN: usize = ACCEPTEX_ADDR_LEN * 2;
 
 pub struct AcceptOp<'a> {
     handle: &'a InnerRawHandle,
@@ -550,7 +550,7 @@ impl Op for AcceptOp<'_> {
                 get_accept_ex_sockaddrs_fn(
                     peer.as_ptr() as *const c_void,
                     0,
-                    0,
+                    ACCEPTEX_ADDR_LEN as _,
                     ACCEPTEX_ADDR_LEN as _,
                     &mut local_sockaddr as *mut *mut SOCKADDR_STORAGE as *mut *mut SOCKADDR,
                     &mut local_sockaddr_len as *mut i32,
@@ -632,7 +632,7 @@ impl Op for AcceptOp<'_> {
                 accept_socket,
                 accept_output_buffer.as_mut_ptr().cast::<c_void>(),
                 0,
-                0,
+                ACCEPTEX_ADDR_LEN as u32,
                 ACCEPTEX_ADDR_LEN as u32,
                 &mut self.bytes_received,
                 overlapped,

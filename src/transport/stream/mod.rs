@@ -3904,26 +3904,59 @@ async fn run_windows_tcp_accept_pool(server: Arc<ServerCore>, listener: StdTcpLi
         .map_or(4, usize::from)
         .saturating_mul(2)
         .clamp(4, 32);
-    let mut listeners = Vec::with_capacity(lane_count);
-    listeners.push(listener);
-    for _ in 1..lane_count {
-        match listeners[0].try_clone() {
-            Ok(listener) => listeners.push(listener),
-            Err(err) => {
-                report_server_io_error(&server, err, "failed to prepare TCP accept pool");
-                break;
-            }
+    let listener = match VibeTcpListener::from_std(listener) {
+        Ok(listener) => Arc::new(listener),
+        Err(err) => {
+            report_server_io_error(&server, err, "TCP server accept failed");
+            return;
         }
-    }
-
-    let lanes = listeners
-        .into_iter()
-        .map(|listener| vibeio::spawn(run_tcp_accept_lane(Arc::clone(&server), listener)))
+    };
+    let lanes = (0..lane_count)
+        .map(|_| {
+            vibeio::spawn(run_windows_tcp_accept_lane(
+                Arc::clone(&server),
+                Arc::clone(&listener),
+            ))
+        })
         .collect();
     let _pool = WindowsAcceptPool(lanes);
     std::future::pending::<()>().await;
 }
 
+#[cfg(windows)]
+async fn run_windows_tcp_accept_lane(server: Arc<ServerCore>, listener: Arc<VibeTcpListener>) {
+    profiling::scope!("stream.run_tcp_accept_task");
+    loop {
+        if server.is_closed() {
+            return;
+        }
+
+        match listener.accept().await {
+            Ok((stream, _addr)) => {
+                let raw = stream.into_raw_socket();
+                let stream = from_owned_raw_socket::<StdTcpStream>(raw);
+                if !configure_accepted_tcp_stream(
+                    &server,
+                    &stream,
+                    "failed to configure TCP connection",
+                ) {
+                    continue;
+                }
+                schedule_accepted_transport(
+                    &server,
+                    AcceptedStream::Tcp(stream),
+                    "failed to accept TCP connection",
+                );
+            }
+            Err(err) => {
+                report_server_io_error(&server, err, "TCP server accept failed");
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
 async fn run_tcp_accept_lane(server: Arc<ServerCore>, listener: StdTcpListener) {
     profiling::scope!("stream.run_tcp_accept_task");
     let listener = match VibeTcpListener::from_std(listener) {
@@ -3941,13 +3974,8 @@ async fn run_tcp_accept_lane(server: Arc<ServerCore>, listener: StdTcpListener) 
 
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                #[cfg(unix)]
                 // SAFETY: `into_raw_fd` transfers sole ownership to `StdTcpStream`.
                 let stream = unsafe { StdTcpStream::from_raw_fd(stream.into_raw_fd()) };
-                #[cfg(windows)]
-                let raw = stream.into_raw_socket();
-                #[cfg(windows)]
-                let stream = from_owned_raw_socket::<StdTcpStream>(raw);
                 if !configure_accepted_tcp_stream(
                     &server,
                     &stream,
