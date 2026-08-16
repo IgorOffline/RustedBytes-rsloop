@@ -889,7 +889,7 @@ impl LoopCore {
             return Ok(None);
         }
 
-        let result = match ready.invoke(py) {
+        match ready.invoke(py) {
             Ok(_) => Ok(None),
             Err(err) => handle_callback_error(
                 py,
@@ -898,9 +898,7 @@ impl LoopCore {
                 err,
                 format!("<{:?} id={}>", ready.kind(), ready.id()),
             ),
-        };
-
-        result
+        }
     }
 
     fn rearm_fd_watch_if_needed(&self, ready: &ReadyCallback) {
@@ -970,6 +968,7 @@ impl LoopCore {
     /// the next time the loop parks in `block_on`; its completions push ready
     /// items and wake the loop **on the same thread**, with no cross-thread hop.
     /// Returns `false` if the loop has no runtime yet (spawned before first run).
+    #[cfg(unix)]
     pub(crate) fn spawn_io<F>(&self, future: F) -> bool
     where
         F: Future<Output = ()> + 'static,

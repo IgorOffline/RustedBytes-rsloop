@@ -996,7 +996,12 @@ fn handle_process_command(
             }
         }
         #[cfg(windows)]
-        ProcessCommand::Terminate | ProcessCommand::SendSignal(_) => {
+        ProcessCommand::Terminate => {
+            kill_process_child(core, child, "subprocess kill failed");
+        }
+        #[cfg(windows)]
+        ProcessCommand::SendSignal(sig) => {
+            let _ = sig;
             kill_process_child(core, child, "subprocess kill failed");
         }
     }

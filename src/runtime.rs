@@ -308,6 +308,10 @@ impl RuntimeDispatcher {
                     self.signal_tasks
                         .insert(sig, SignalWatcher { handle, join });
                 }
+                #[cfg(not(unix))]
+                {
+                    let _ = sig;
+                }
             }
             LoopCommand::Signal(LoopSignalCommand::StopWatcher(sig)) => {
                 #[cfg(unix)]
@@ -478,8 +482,8 @@ impl RuntimeDispatcher {
                 // vibeio JoinHandle has no Drop, so dropping it detaches (does
                 // not cancel) the running task.
                 let core = Arc::clone(&self.core);
-                let _ = vibeio::spawn(crate::stream_transport::run_connect_watch_task(
-                    core, fd, future,
+                std::mem::drop(vibeio::spawn(
+                    crate::stream_transport::run_connect_watch_task(core, fd, future),
                 ));
             }
             #[cfg(unix)]

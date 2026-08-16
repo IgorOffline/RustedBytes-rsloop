@@ -29,6 +29,7 @@ pub(crate) fn create_future<'py>(py: Python<'py>) -> &'py Bound<'py, PyString> {
     interned(py, &NAME, "create_future")
 }
 
+#[cfg(unix)]
 pub(crate) fn errno<'py>(py: Python<'py>) -> &'py Bound<'py, PyString> {
     static NAME: OnceLock<Py<PyString>> = OnceLock::new();
     interned(py, &NAME, "errno")

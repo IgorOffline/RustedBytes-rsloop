@@ -31,13 +31,14 @@ use crate::process_transport::{
 use crate::python_names;
 use crate::stream_transport::{
     PyServer, PyStreamTransport, ServerCreateParams, TransportSpawnContext,
-    create_server as create_py_server, remove_unix_socket_if_present, spawn_read_pipe_transport,
-    spawn_write_pipe_transport, start_tls_transport, tcp_listener_from_owned_socket_fd,
-    tcp_server_listener, transport_from_socket, transport_from_socket_server_tls,
-    transport_from_socket_tls,
+    create_server as create_py_server, spawn_read_pipe_transport, spawn_write_pipe_transport,
+    start_tls_transport, tcp_listener_from_owned_socket_fd, tcp_server_listener,
+    transport_from_socket, transport_from_socket_server_tls, transport_from_socket_tls,
 };
 #[cfg(unix)]
-use crate::stream_transport::{unix_listener_from_owned_socket_fd, unix_server_listener};
+use crate::stream_transport::{
+    remove_unix_socket_if_present, unix_listener_from_owned_socket_fd, unix_server_listener,
+};
 use crate::tls::{client_tls_settings, server_tls_settings};
 
 const WSAEISCONN: i32 = 10056;
@@ -1057,6 +1058,7 @@ fn set_tcp_keepalive_option(
     Ok(())
 }
 
+#[cfg(unix)]
 fn build_unix_server_socket(
     py: Python<'_>,
     path: Option<Py<PyAny>>,
@@ -1384,6 +1386,7 @@ fn apply_process_executable(
         command.arg0(executable);
         #[cfg(windows)]
         {
+            let _ = command;
             drop(executable);
             return Err(PyNotImplementedError::new_err(
                 "subprocess executable override is not implemented on Windows",
@@ -2296,6 +2299,7 @@ impl PyLoop {
         {
             let _ = (
                 slf,
+                py,
                 protocol_factory,
                 path,
                 sock,
@@ -2303,74 +2307,77 @@ impl PyLoop {
                 start_serving,
                 cleanup_socket,
             );
-            return Err(Self::not_implemented("create_unix_server"));
+            Err(Self::not_implemented("create_unix_server"))
         }
-        let tls = ssl
-            .as_ref()
-            .map(|ssl| {
-                server_tls_settings(
-                    py,
-                    ssl.bind(py),
-                    ssl_handshake_timeout,
-                    ssl_shutdown_timeout,
-                )
-            })
-            .transpose()?
-            .map(Arc::new);
-
-        let locals = Self::task_locals(py, &slf)?;
-        let loop_obj = Self::as_py_any(py, &slf);
-        let core = slf.borrow(py).core.clone();
-        let (context, context_needs_run) = capture_context(py, None)?;
-
-        pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
-            let socket_obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
-                if let Some(sock) = &sock {
-                    sock.call_method1(py, "setblocking", (false,))?;
-                    return Ok(sock.clone_ref(py));
-                }
-                build_unix_server_socket(
-                    py,
-                    path.as_ref().map(|value| value.clone_ref(py)),
-                    backlog,
-                )
-            })?;
-
-            let server = Python::attach(|py| -> PyResult<Py<PyServer>> {
-                let sockets = vec![socket_obj.clone_ref(py)];
-                let listeners = listener_sources_from_sockets(py, &sockets)?;
-                let cleanup_path = if cleanup_socket {
-                    path.as_ref()
-                        .and_then(|value| value.bind(py).extract::<String>().ok())
-                        .map(std::path::PathBuf::from)
-                } else {
-                    None
-                };
-                let server = create_py_server(
-                    py,
-                    ServerCreateParams::new(
-                        stream_spawn_context(
-                            py,
-                            &core,
-                            &loop_obj,
-                            &protocol_factory,
-                            &context,
-                            context_needs_run,
-                        ),
-                        sockets,
-                        listeners,
+        #[cfg(unix)]
+        {
+            let tls = ssl
+                .as_ref()
+                .map(|ssl| {
+                    server_tls_settings(
+                        py,
+                        ssl.bind(py),
+                        ssl_handshake_timeout,
+                        ssl_shutdown_timeout,
                     )
-                    .with_cleanup_path(cleanup_path)
-                    .with_tls(tls.clone()),
-                )?;
-                if start_serving {
-                    server.borrow(py).core.spawn_accept_tasks();
-                }
-                Ok(server)
-            })?;
+                })
+                .transpose()?
+                .map(Arc::new);
 
-            Ok(Python::attach(|py| server.into_any().clone_ref(py)))
-        })
+            let locals = Self::task_locals(py, &slf)?;
+            let loop_obj = Self::as_py_any(py, &slf);
+            let core = slf.borrow(py).core.clone();
+            let (context, context_needs_run) = capture_context(py, None)?;
+
+            pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
+                let socket_obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
+                    if let Some(sock) = &sock {
+                        sock.call_method1(py, "setblocking", (false,))?;
+                        return Ok(sock.clone_ref(py));
+                    }
+                    build_unix_server_socket(
+                        py,
+                        path.as_ref().map(|value| value.clone_ref(py)),
+                        backlog,
+                    )
+                })?;
+
+                let server = Python::attach(|py| -> PyResult<Py<PyServer>> {
+                    let sockets = vec![socket_obj.clone_ref(py)];
+                    let listeners = listener_sources_from_sockets(py, &sockets)?;
+                    let cleanup_path = if cleanup_socket {
+                        path.as_ref()
+                            .and_then(|value| value.bind(py).extract::<String>().ok())
+                            .map(std::path::PathBuf::from)
+                    } else {
+                        None
+                    };
+                    let server = create_py_server(
+                        py,
+                        ServerCreateParams::new(
+                            stream_spawn_context(
+                                py,
+                                &core,
+                                &loop_obj,
+                                &protocol_factory,
+                                &context,
+                                context_needs_run,
+                            ),
+                            sockets,
+                            listeners,
+                        )
+                        .with_cleanup_path(cleanup_path)
+                        .with_tls(tls.clone()),
+                    )?;
+                    if start_serving {
+                        server.borrow(py).core.spawn_accept_tasks();
+                    }
+                    Ok(server)
+                })?;
+
+                Ok(Python::attach(|py| server.into_any().clone_ref(py)))
+            })
+        }
     }
 
     #[pyo3(signature=(protocol_factory, path=None, *, ssl=None, sock=None, server_hostname=None, ssl_handshake_timeout=None, ssl_shutdown_timeout=None))]
@@ -2406,98 +2413,100 @@ impl PyLoop {
         }
         #[cfg(not(unix))]
         {
-            let _ = (slf, protocol_factory, path, sock);
-            return Err(Self::not_implemented("create_unix_connection"));
+            let _ = (slf, py, protocol_factory, path, sock);
+            Err(Self::not_implemented("create_unix_connection"))
         }
+        #[cfg(unix)]
+        {
+            let locals = Self::task_locals(py, &slf)?;
+            let loop_obj = Self::as_py_any(py, &slf);
+            let core = slf.borrow(py).core.clone();
+            let (context, context_needs_run) = capture_context(py, None)?;
 
-        let locals = Self::task_locals(py, &slf)?;
-        let loop_obj = Self::as_py_any(py, &slf);
-        let core = slf.borrow(py).core.clone();
-        let (context, context_needs_run) = capture_context(py, None)?;
-
-        pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
-            let protocol = Python::attach(|py| {
-                call_protocol_factory(
-                    py,
-                    &loop_obj,
-                    &context,
-                    context_needs_run,
-                    &protocol_factory,
-                )
-            })?;
-
-            let socket_obj = if let Some(sock) = sock {
-                Python::attach(|py| -> PyResult<Py<PyAny>> {
-                    sock.call_method1(py, "setblocking", (false,))?;
-                    Ok(sock.clone_ref(py))
-                })?
-            } else {
-                let socket_obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
-                    let socket_mod = py.import("socket")?;
-                    let sock = socket_mod.getattr("socket")?.call1((
-                        socket_mod.getattr("AF_UNIX")?,
-                        socket_mod.getattr("SOCK_STREAM")?,
-                    ))?;
-                    sock.call_method1("setblocking", (false,))?;
-                    Ok(sock.unbind())
-                })?;
-                let address = path.ok_or_else(|| {
-                    PyRuntimeError::new_err("path is required when sock is not provided")
-                })?;
-                let socket_for_connect = Python::attach(|py| socket_obj.clone_ref(py));
-                connect_socket_to_address(socket_for_connect, address).await?;
-                socket_obj
-            };
-
-            let transport = if let Some(ssl) = ssl.as_ref() {
-                let (spawn_context, tls) = Python::attach(|py| {
-                    let tls = client_tls_settings(
+            pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
+                let protocol = Python::attach(|py| {
+                    call_protocol_factory(
                         py,
-                        ssl.bind(py),
-                        server_hostname.as_ref().map(|value| value.bind(py)),
-                        ssl_handshake_timeout,
-                        ssl_shutdown_timeout,
-                    )?;
-                    Ok::<_, PyErr>((
-                        stream_spawn_context(
-                            py,
-                            &core,
-                            &loop_obj,
-                            &protocol,
-                            &context,
-                            context_needs_run,
-                        ),
-                        tls,
-                    ))
-                })?;
-                async_std::task::spawn_blocking(move || {
-                    Python::attach(|py| {
-                        transport_from_socket_tls(py, spawn_context, socket_obj, tls)
-                    })
-                })
-                .await?
-            } else {
-                Python::attach(|py| {
-                    transport_from_socket(
-                        py,
-                        stream_spawn_context(
-                            py,
-                            &core,
-                            &loop_obj,
-                            &protocol,
-                            &context,
-                            context_needs_run,
-                        ),
-                        socket_obj,
+                        &loop_obj,
+                        &context,
+                        context_needs_run,
+                        &protocol_factory,
                     )
-                })?
-            };
+                })?;
 
-            Python::attach(|py| {
-                let result = PyTuple::new(py, [transport.into_any(), protocol.clone_ref(py)])?;
-                Ok(result.unbind().into_any())
+                let socket_obj = if let Some(sock) = sock {
+                    Python::attach(|py| -> PyResult<Py<PyAny>> {
+                        sock.call_method1(py, "setblocking", (false,))?;
+                        Ok(sock.clone_ref(py))
+                    })?
+                } else {
+                    let socket_obj = Python::attach(|py| -> PyResult<Py<PyAny>> {
+                        let socket_mod = py.import("socket")?;
+                        let sock = socket_mod.getattr("socket")?.call1((
+                            socket_mod.getattr("AF_UNIX")?,
+                            socket_mod.getattr("SOCK_STREAM")?,
+                        ))?;
+                        sock.call_method1("setblocking", (false,))?;
+                        Ok(sock.unbind())
+                    })?;
+                    let address = path.ok_or_else(|| {
+                        PyRuntimeError::new_err("path is required when sock is not provided")
+                    })?;
+                    let socket_for_connect = Python::attach(|py| socket_obj.clone_ref(py));
+                    connect_socket_to_address(socket_for_connect, address).await?;
+                    socket_obj
+                };
+
+                let transport = if let Some(ssl) = ssl.as_ref() {
+                    let (spawn_context, tls) = Python::attach(|py| {
+                        let tls = client_tls_settings(
+                            py,
+                            ssl.bind(py),
+                            server_hostname.as_ref().map(|value| value.bind(py)),
+                            ssl_handshake_timeout,
+                            ssl_shutdown_timeout,
+                        )?;
+                        Ok::<_, PyErr>((
+                            stream_spawn_context(
+                                py,
+                                &core,
+                                &loop_obj,
+                                &protocol,
+                                &context,
+                                context_needs_run,
+                            ),
+                            tls,
+                        ))
+                    })?;
+                    async_std::task::spawn_blocking(move || {
+                        Python::attach(|py| {
+                            transport_from_socket_tls(py, spawn_context, socket_obj, tls)
+                        })
+                    })
+                    .await?
+                } else {
+                    Python::attach(|py| {
+                        transport_from_socket(
+                            py,
+                            stream_spawn_context(
+                                py,
+                                &core,
+                                &loop_obj,
+                                &protocol,
+                                &context,
+                                context_needs_run,
+                            ),
+                            socket_obj,
+                        )
+                    })?
+                };
+
+                Python::attach(|py| {
+                    let result = PyTuple::new(py, [transport.into_any(), protocol.clone_ref(py)])?;
+                    Ok(result.unbind().into_any())
+                })
             })
-        })
+        }
     }
     #[pyo3(signature=(protocol_factory, sock, *, ssl=None, ssl_handshake_timeout=None, ssl_shutdown_timeout=None))]
     fn connect_accepted_socket(
@@ -2952,7 +2961,7 @@ impl PyLoop {
         // pure overhead — skip straight to the loop-thread connect on Unix.
         #[cfg(unix)]
         {
-            return fast_sock_connect(&slf, py, sock, address);
+            fast_sock_connect(&slf, py, sock, address)
         }
         #[cfg(not(unix))]
         {
