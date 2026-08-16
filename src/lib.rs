@@ -1,36 +1,37 @@
 mod async_event;
+mod bindings;
 mod blocking;
-mod callbacks;
 mod context;
+mod engine;
 mod errors;
-mod fast_streams;
-mod fd_ops;
-mod loop_core;
 mod module_init;
-mod process_transport;
+mod platform;
 mod profiler;
-mod python_api;
 mod python_names;
-mod runtime;
 pub mod rust_async;
-mod stream_transport;
-mod tls;
-#[cfg(windows)]
-mod windows_vibeio;
+mod transport;
 
-pub use callbacks::{PyHandle, PyTimerHandle, ReadyCallback};
-pub use fast_streams::{PyFastStreamReader, PyFastStreamWriter, open_connection, start_server};
-pub use loop_core::{
-    LoopCommand, LoopCore, LoopFutureCommand, LoopIoCommand, LoopRunCommand, LoopSignalCommand,
-    LoopTransportCommand,
-};
-pub use process_transport::{PyProcessPipeTransport, PyProcessTransport};
-pub use profiler::{profiler_compiled, profiler_running, start_profiler, stop_profiler};
-pub use python_api::{
+pub(crate) use platform::fd as fd_ops;
+#[cfg(windows)]
+pub(crate) use platform::windows_vibeio;
+
+// Compatibility re-exports for the crate's existing Rust API. Internal module
+// registration imports from the owning modules directly, so these can be
+// deprecated or versioned independently in a future breaking release.
+pub use bindings::{
     PyLoop, asyncgen_finalizer_hook, asyncgen_firstiter_hook, future_done_stop, new_event_loop,
     signal_bridge,
 };
-pub use stream_transport::{PyServer, PyStreamTransport};
+pub use engine::{
+    LoopCommand, LoopCore, LoopFutureCommand, LoopIoCommand, LoopRunCommand, LoopSignalCommand,
+    LoopTransportCommand, PyHandle, PyTimerHandle, ReadyCallback,
+};
+pub use profiler::{profiler_compiled, profiler_running, start_profiler, stop_profiler};
+pub use transport::process::{PyProcessPipeTransport, PyProcessTransport};
+pub use transport::stream::{
+    PyFastStreamReader, PyFastStreamWriter, open_connection, start_server,
+};
+pub use transport::stream::{PyServer, PyStreamTransport};
 
 use pyo3::prelude::*;
 

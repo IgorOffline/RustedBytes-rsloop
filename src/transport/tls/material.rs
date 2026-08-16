@@ -1,3 +1,5 @@
+//! Certificate, private-key, and root-store loading.
+
 use std::fs;
 use std::io::{self, BufReader, Cursor};
 

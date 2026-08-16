@@ -43,23 +43,25 @@ The Rust code lives in `src/`.
 Important files:
 
 - `lib.rs`: extension module entry point
-- `python_api.rs`: exposes Rust functionality as Python classes and functions
-- `loop_core.rs`: core loop state and commands
-- `runtime.rs`: runtime coordination work
-- `callbacks.rs`: callback handles and scheduling helpers
-- `stream_transport.rs`: stream transports and servers
-- `process_transport.rs`: subprocess and pipe transport support
-- `fast_streams.rs`: optimized stream helpers used by patched `asyncio` APIs
-- `tls.rs`: TLS support
-- `fd_ops.rs`: lower-level file descriptor work
+- `bindings/loop_api.rs`: exposes Rust functionality as Python classes and functions
+- `engine/loop_core.rs`: core loop state and loop-thread execution
+- `engine/commands.rs`: commands shared by the loop and runtime dispatcher
+- `engine/dispatcher.rs`: coordination-thread runtime work
+- `engine/callbacks.rs`: callback handles and scheduling helpers
+- `transport/stream/`: stream transports, servers, fast streams, and I/O workers
+- `transport/process/`: subprocess and pipe transport support
+- `transport/tls/`: TLS configuration and certificate material
+- `platform/fd/`: lower-level cross-platform descriptor work
 - `context.rs`: running-loop and context management helpers
 - `errors.rs`: shared error types
 - `profiler.rs`: Tracy profiler support
 - `rust_async.rs`: public Rust/Python async interop helpers for downstream extensions
 - `async_event.rs`, `blocking.rs`, `python_names.rs`: support code used by the public pieces
-- `windows_vibeio.rs`: Windows-specific support
+- `platform/windows_vibeio.rs`: Windows-specific runtime support
 
-You do not need to understand every file before using the project. For a first pass, `lib.rs`, `python_api.rs`, and `loop_core.rs` are the most useful entry points.
+You do not need to understand every file before using the project. For a first
+pass, `lib.rs`, `bindings/loop_api.rs`, and `engine/loop_core.rs` are the most
+useful entry points.
 
 ## Runtime model
 

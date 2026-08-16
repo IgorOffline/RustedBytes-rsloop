@@ -32,14 +32,13 @@ Path: `src/`
 This is the engine room of the project.
 
 - `lib.rs`: registers the Python extension module
-- `python_api.rs`: large bridge between Python and Rust
-- `loop_core.rs`: loop commands and state
-- `runtime.rs`: runtime orchestration
-- `callbacks.rs`: scheduled callback support
-- `stream_transport.rs`: stream, server, and transport logic
-- `process_transport.rs`: subprocess and pipe logic
-- `tls.rs`: TLS handling
-- `fast_streams.rs`: fast versions of common stream helpers
+- `bindings/`: PyO3 event-loop bindings and Python compatibility helpers
+- `engine/`: loop state, shared commands, callbacks, and runtime dispatch
+- `transport/stream/`: stream transports, servers, fast streams, and I/O workers
+- `transport/process/`: subprocess lifecycle and pipe transports
+- `transport/tls/`: TLS configuration and certificate loading
+- `platform/`: Unix/Windows descriptor and runtime integration
+- `rust_async.rs`: the public Rust/Python async interop API
 
 If you want to understand behavior changes, this directory is usually where the real implementation lives.
 

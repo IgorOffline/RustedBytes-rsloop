@@ -1,10 +1,15 @@
 use pyo3::prelude::*;
 
-use crate::{
-    PyFastStreamReader, PyFastStreamWriter, PyHandle, PyLoop, PyProcessPipeTransport,
-    PyProcessTransport, PyServer, PyStreamTransport, PyTimerHandle, asyncgen_finalizer_hook,
-    asyncgen_firstiter_hook, future_done_stop, new_event_loop, open_connection, profiler_compiled,
-    profiler_running, signal_bridge, start_profiler, start_server, stop_profiler,
+use crate::bindings::{
+    PyLoop, asyncgen_finalizer_hook, asyncgen_firstiter_hook, future_done_stop, new_event_loop,
+    signal_bridge,
+};
+use crate::engine::{PyHandle, PyTimerHandle};
+use crate::profiler::{profiler_compiled, profiler_running, start_profiler, stop_profiler};
+use crate::transport::process::{PyProcessPipeTransport, PyProcessTransport};
+use crate::transport::stream::{
+    PyFastStreamReader, PyFastStreamWriter, PyServer, PyStreamTransport, open_connection,
+    start_server,
 };
 
 pub(crate) fn add_module_contents(m: &Bound<'_, PyModule>) -> PyResult<()> {

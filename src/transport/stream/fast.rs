@@ -1,3 +1,5 @@
+//! Optimized asyncio stream reader, protocol, and writer bindings.
+
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
@@ -5,9 +7,9 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::TaskLocals;
 
-use crate::python_api::PyLoop;
+use super::{PyStreamTransport, task_locals_for_loop};
+use crate::bindings::PyLoop;
 use crate::python_names;
-use crate::stream_transport::{PyStreamTransport, task_locals_for_loop};
 
 const DEFAULT_STREAM_LIMIT: usize = 65_536;
 
@@ -23,7 +25,7 @@ fn asyncio_iscoroutine(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// Create a future on `loop_obj`, skipping the Python-level method dispatch
 /// when the loop is a native rsloop instance running on this thread.
 fn loop_create_future(py: Python<'_>, loop_obj: &Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(future) = crate::python_api::try_fast_create_future(py, loop_obj)? {
+    if let Some(future) = crate::bindings::try_fast_create_future(py, loop_obj)? {
         return Ok(future);
     }
     python_names::call_method0(py, loop_obj.bind(py), python_names::create_future(py))
@@ -858,11 +860,11 @@ impl PyFastStreamProtocol {
             return Ok(());
         }
 
-        let task =
-            match crate::python_api::try_fast_create_task(py, &loop_obj, result.clone_ref(py))? {
-                Some(task) => task,
-                None => loop_obj.call_method1(py, "create_task", (result,))?,
-            };
+        let task = match crate::bindings::try_fast_create_task(py, &loop_obj, result.clone_ref(py))?
+        {
+            Some(task) => task,
+            None => loop_obj.call_method1(py, "create_task", (result,))?,
+        };
         slf.borrow_mut(py).task = task.clone_ref(py);
         let done_cb = Py::new(
             py,

@@ -61,8 +61,8 @@ If you are new to the project, this order works well:
 2. `python/rsloop/_run.py`
 3. `python/rsloop/_loop_compat.py`
 4. `src/lib.rs`
-5. `src/python_api.rs`
-6. `src/loop_core.rs`
+5. `src/bindings/loop_api.rs`
+6. `src/engine/loop_core.rs`
 
 This order moves from simple Python wrappers to the larger Rust internals.
 

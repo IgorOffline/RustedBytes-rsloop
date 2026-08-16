@@ -1,3 +1,5 @@
+//! Stream, server, socket, pipe, and TLS transport implementation.
+
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write as _};
@@ -9,9 +11,7 @@ use std::os::raw::c_int;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 #[cfg(windows)]
-use std::os::windows::io::{
-    AsRawHandle, AsRawSocket, FromRawHandle, FromRawSocket, IntoRawSocket, RawHandle, RawSocket,
-};
+use std::os::windows::io::{IntoRawSocket, RawSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -24,7 +24,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods, PyBytes, PyDict, PySlice, PyString, PyTuple};
 use pyo3_async_runtimes::TaskLocals;
 use rustls::{ClientConnection, ServerConnection};
-use socket2::Socket;
 use tokio::io::AsyncReadExt;
 #[cfg(windows)]
 use vibeio::io::AsyncRead as VibeAsyncRead;
@@ -39,15 +38,28 @@ use windows_sys::Win32::{
     System::IO::CancelIoEx,
 };
 
+use super::tls::{ClientTlsSettings, ServerTlsSettings, tls_extra};
 use crate::async_event::AsyncEvent;
 use crate::context::{
     ensure_running_loop, run_in_context, run_in_context_noargs, run_in_context_onearg,
 };
-use crate::fast_streams::{PyFastStreamProtocol, PyFastStreamReader};
+use crate::engine::{LoopCommand, LoopCore, LoopIoCommand, LoopTransportCommand};
 use crate::fd_ops;
-use crate::loop_core::{LoopCommand, LoopCore, LoopIoCommand, LoopTransportCommand};
 use crate::python_names;
-use crate::tls::{ClientTlsSettings, ServerTlsSettings, tls_extra};
+
+mod buffers;
+mod fast;
+mod platform;
+mod server_types;
+use buffers::{OwnedWriteBuffer, PendingReadBuffer};
+use fast::PyFastStreamProtocol;
+pub use fast::{PyFastStreamReader, PyFastStreamWriter, open_connection, start_server};
+use platform::{file_raw_fd, socket_from_owned_raw, tcp_listener_raw_fd, tcp_stream_raw_fd};
+#[cfg(unix)]
+use platform::{from_owned_raw_fd, unix_raw_fd};
+#[cfg(windows)]
+use platform::{from_owned_raw_handle, from_owned_raw_socket};
+pub use server_types::{AcceptedStream, ServerCreateParams, ServerListener, TransportSpawnContext};
 
 enum WriterCommand {
     Data(OwnedWriteBuffer),
@@ -100,151 +112,6 @@ fn reader_spin_window() -> Duration {
             .unwrap_or(30);
         Duration::from_micros(micros.min(1_000))
     })
-}
-
-struct OwnedWriteBuffer {
-    bytes: Box<[u8]>,
-    offset: usize,
-}
-
-struct PendingReadBuffer(Vec<u8>);
-
-impl PendingReadBuffer {
-    #[inline]
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-
-    fn extend(&mut self, data: Vec<u8>) {
-        self.0.extend_from_slice(&data);
-    }
-}
-
-impl OwnedWriteBuffer {
-    #[inline]
-    fn from_slice(data: &[u8]) -> Self {
-        Self {
-            bytes: Box::<[u8]>::from(data),
-            offset: 0,
-        }
-    }
-
-    #[inline]
-    fn from_vec(data: Vec<u8>) -> Self {
-        Self {
-            bytes: data.into_boxed_slice(),
-            offset: 0,
-        }
-    }
-
-    #[inline]
-    fn remaining(&self) -> &[u8] {
-        &self.bytes[self.offset..]
-    }
-
-    #[inline]
-    fn advance(&mut self, written: usize) {
-        self.offset += written;
-    }
-
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.offset == self.bytes.len()
-    }
-}
-
-pub enum ServerListener {
-    Tcp(StdTcpListener),
-    #[cfg(unix)]
-    Unix(StdUnixListener),
-}
-
-pub enum AcceptedStream {
-    Tcp(StdTcpStream),
-    #[cfg(unix)]
-    Unix(StdUnixStream),
-}
-
-pub struct TransportSpawnContext {
-    pub loop_core: Arc<LoopCore>,
-    pub loop_obj: Py<PyAny>,
-    pub protocol: Py<PyAny>,
-    pub context: Py<PyAny>,
-    pub context_needs_run: bool,
-}
-
-impl TransportSpawnContext {
-    pub fn new(
-        py: Python<'_>,
-        loop_core: Arc<LoopCore>,
-        loop_obj: &Py<PyAny>,
-        protocol: Py<PyAny>,
-        context: &Py<PyAny>,
-        context_needs_run: bool,
-    ) -> Self {
-        Self {
-            loop_core,
-            loop_obj: loop_obj.clone_ref(py),
-            protocol,
-            context: context.clone_ref(py),
-            context_needs_run,
-        }
-    }
-}
-
-pub struct ServerCreateParams {
-    pub loop_core: Arc<LoopCore>,
-    pub loop_obj: Py<PyAny>,
-    pub protocol_factory: Py<PyAny>,
-    pub context: Py<PyAny>,
-    pub context_needs_run: bool,
-    pub sockets: Vec<Py<PyAny>>,
-    pub listeners: Vec<ServerListener>,
-    pub cleanup_path: Option<PathBuf>,
-    pub tls: Option<Arc<ServerTlsSettings>>,
-}
-
-impl ServerCreateParams {
-    pub fn new(
-        spawn_context: TransportSpawnContext,
-        sockets: Vec<Py<PyAny>>,
-        listeners: Vec<ServerListener>,
-    ) -> Self {
-        let TransportSpawnContext {
-            loop_core,
-            loop_obj,
-            protocol,
-            context,
-            context_needs_run,
-        } = spawn_context;
-
-        Self {
-            loop_core,
-            loop_obj,
-            protocol_factory: protocol,
-            context,
-            context_needs_run,
-            sockets,
-            listeners,
-            cleanup_path: None,
-            tls: None,
-        }
-    }
-
-    pub fn with_cleanup_path(mut self, cleanup_path: Option<PathBuf>) -> Self {
-        self.cleanup_path = cleanup_path;
-        self
-    }
-
-    pub fn with_tls(mut self, tls: Option<Arc<ServerTlsSettings>>) -> Self {
-        self.tls = tls;
-        self
-    }
 }
 
 struct ProtocolCallbacks {
@@ -2644,85 +2511,6 @@ pub fn task_locals_for_loop(py: Python<'_>, loop_obj: &Py<PyAny>) -> PyResult<Ta
     TaskLocals::new(loop_obj.clone_ref(py).into_bound(py)).copy_context(py)
 }
 
-#[cfg(unix)]
-fn file_raw_fd(file: &std::fs::File) -> fd_ops::RawFd {
-    file.as_raw_fd() as fd_ops::RawFd
-}
-
-#[cfg(windows)]
-fn file_raw_fd(file: &std::fs::File) -> fd_ops::RawFd {
-    file.as_raw_handle() as isize as fd_ops::RawFd
-}
-
-#[cfg(unix)]
-#[inline]
-fn tcp_stream_raw_fd(stream: &StdTcpStream) -> fd_ops::RawFd {
-    stream.as_raw_fd() as fd_ops::RawFd
-}
-
-#[cfg(windows)]
-#[inline]
-fn tcp_stream_raw_fd(stream: &StdTcpStream) -> fd_ops::RawFd {
-    stream.as_raw_socket() as fd_ops::RawFd
-}
-
-#[cfg(unix)]
-fn tcp_listener_raw_fd(listener: &StdTcpListener) -> fd_ops::RawFd {
-    listener.as_raw_fd() as fd_ops::RawFd
-}
-
-#[cfg(windows)]
-fn tcp_listener_raw_fd(listener: &StdTcpListener) -> fd_ops::RawFd {
-    listener.as_raw_socket() as fd_ops::RawFd
-}
-
-#[cfg(unix)]
-#[inline]
-fn unix_raw_fd(fd: std::os::fd::RawFd) -> fd_ops::RawFd {
-    fd as fd_ops::RawFd
-}
-
-#[cfg(unix)]
-fn raw_fd_for_std(fd: fd_ops::RawFd) -> PyResult<std::os::fd::RawFd> {
-    fd.try_into()
-        .map_err(|_| PyRuntimeError::new_err("fd out of range"))
-}
-
-#[cfg(unix)]
-fn from_owned_raw_fd<T: FromRawFd>(fd: fd_ops::RawFd) -> PyResult<T> {
-    let fd = raw_fd_for_std(fd)?;
-    // SAFETY: The caller passes an owned descriptor and the returned Rust IO object takes over
-    // responsibility for closing it exactly once.
-    Ok(unsafe { T::from_raw_fd(fd) })
-}
-
-#[cfg(windows)]
-fn from_owned_raw_socket<T: FromRawSocket>(socket: RawSocket) -> T {
-    // SAFETY: The caller passes an owned socket handle and the returned Rust IO object takes over
-    // responsibility for closing it exactly once.
-    unsafe { T::from_raw_socket(socket) }
-}
-
-#[cfg(windows)]
-fn from_owned_raw_handle<T: FromRawHandle>(handle: RawHandle) -> T {
-    // SAFETY: The caller passes an owned Windows handle and the returned Rust IO object takes over
-    // responsibility for closing it exactly once.
-    unsafe { T::from_raw_handle(handle) }
-}
-
-#[cfg(unix)]
-fn socket_from_owned_raw(fd: fd_ops::RawFd) -> PyResult<Socket> {
-    from_owned_raw_fd(fd)
-}
-
-#[cfg(windows)]
-fn socket_from_owned_raw(fd: fd_ops::RawFd) -> PyResult<Socket> {
-    let fd: RawSocket = fd
-        .try_into()
-        .map_err(|_| PyRuntimeError::new_err("socket handle out of range"))?;
-    Ok(from_owned_raw_socket(fd))
-}
-
 #[inline]
 fn detached_socket_handle(py: Python<'_>, socket_obj: &Py<PyAny>) -> PyResult<fd_ops::RawFd> {
     socket_obj.call_method0(py, "detach")?.extract(py)
@@ -4152,7 +3940,7 @@ fn spawn_socket_reader(
     fd: fd_ops::RawFd,
     core: Arc<StreamTransportCore>,
     reader: ReaderTarget,
-) -> Result<(), crate::loop_core::LoopCoreError> {
+) -> Result<(), crate::engine::LoopCoreError> {
     let loop_core = Arc::clone(&core.loop_core);
     loop_core.send_command(LoopCommand::Io(LoopIoCommand::StartSocketReader {
         fd,

@@ -1,3 +1,5 @@
+//! Windows descriptor, socket, handle, and polling operations.
+
 use std::io;
 use std::mem;
 use std::net::TcpStream as StdTcpStream;

@@ -200,9 +200,10 @@ The native fast-stream path is used only when:
 
 Otherwise `rsloop` falls back to the stdlib `asyncio.streams` helpers.
 
-The implementation lives in [`src/fast_streams.rs`](./src/fast_streams.rs) and
+The implementation lives in
+[`src/transport/stream/fast.rs`](./src/transport/stream/fast.rs) and
 is backed by the lower level transport code in
-[`src/stream_transport.rs`](./src/stream_transport.rs).
+[`src/transport/stream/mod.rs`](./src/transport/stream/mod.rs).
 
 ## Runtime Model
 

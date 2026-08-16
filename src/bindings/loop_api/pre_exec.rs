@@ -1,3 +1,5 @@
+//! Child-process setup that must run between `fork` and `exec` on Unix.
+
 use std::process::Command;
 
 #[cfg(unix)]

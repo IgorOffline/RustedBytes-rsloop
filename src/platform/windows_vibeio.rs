@@ -1,3 +1,5 @@
+//! Dedicated service-thread bridge for Windows `vibeio` tasks.
+
 #[cfg(windows)]
 use std::collections::HashMap;
 #[cfg(windows)]

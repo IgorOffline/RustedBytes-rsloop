@@ -7,11 +7,12 @@ use std::task::{Context, Poll};
 use std::thread;
 use std::time::Instant;
 
-use crate::fd_ops;
-use crate::loop_core::{
-    LoopCommand, LoopCore, LoopFutureCommand, LoopIoCommand, LoopRunCommand, LoopSignalCommand,
+use super::commands::{
+    LoopCommand, LoopFutureCommand, LoopIoCommand, LoopRunCommand, LoopSignalCommand,
     LoopTransportCommand, ReadyItem,
 };
+use super::loop_core::LoopCore;
+use crate::fd_ops;
 use crossbeam_channel::{Receiver, TryRecvError};
 use pyo3::prelude::*;
 #[cfg(unix)]
@@ -339,10 +340,10 @@ impl RuntimeDispatcher {
                         )
                     };
 
-                    Ok(Some(Arc::new(crate::callbacks::ReadyCallback::new(
+                    Ok(Some(Arc::new(super::callbacks::ReadyCallback::new(
                         py,
                         self.core.next_callback_id(),
-                        crate::callbacks::CallbackKind::Signal(sig),
+                        super::callbacks::CallbackKind::Signal(sig),
                         callback,
                         args,
                         context,
@@ -429,20 +430,20 @@ impl RuntimeDispatcher {
                 }
 
                 let task = match reader {
-                    crate::stream_transport::ReaderTarget::Tcp(stream) => {
+                    crate::transport::stream::ReaderTarget::Tcp(stream) => {
                         WatchTask::Vibeio(vibeio::spawn(
-                            crate::stream_transport::run_tcp_socket_reader_task(core, stream),
+                            crate::transport::stream::run_tcp_socket_reader_task(core, stream),
                         ))
                     }
                     #[cfg(unix)]
-                    crate::stream_transport::ReaderTarget::Unix(stream) => {
+                    crate::transport::stream::ReaderTarget::Unix(stream) => {
                         WatchTask::Vibeio(vibeio::spawn(
-                            crate::stream_transport::run_unix_socket_reader_task(core, stream),
+                            crate::transport::stream::run_unix_socket_reader_task(core, stream),
                         ))
                     }
-                    other @ crate::stream_transport::ReaderTarget::File(_) => {
+                    other @ crate::transport::stream::ReaderTarget::File(_) => {
                         WatchTask::spawn_thread(format!("rsloop-socket-reader-{fd}"), move |stop| {
-                            crate::stream_transport::run_socket_reader_blocking(core, other, stop)
+                            crate::transport::stream::run_socket_reader_blocking(core, other, stop)
                         })
                     }
                 };
@@ -465,7 +466,7 @@ impl RuntimeDispatcher {
                 }
 
                 let task = WatchTask::Vibeio(vibeio::spawn(
-                    crate::stream_transport::run_server_accept_task(server, listener),
+                    crate::transport::stream::run_server_accept_task(server, listener),
                 ));
 
                 self.accept_tasks.insert(fd, task);
@@ -483,7 +484,7 @@ impl RuntimeDispatcher {
                 // not cancel) the running task.
                 let core = Arc::clone(&self.core);
                 std::mem::drop(vibeio::spawn(
-                    crate::stream_transport::run_connect_watch_task(core, fd, future),
+                    crate::transport::stream::run_connect_watch_task(core, fd, future),
                 ));
             }
             #[cfg(unix)]

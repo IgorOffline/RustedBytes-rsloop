@@ -11,11 +11,14 @@ use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::callbacks::{CallbackId, CallbackKind, ReadyCallback};
+use super::callbacks::{CallbackId, CallbackKind, ReadyCallback};
+use super::commands::{
+    LoopCommand, LoopFutureCommand, LoopIoCommand, LoopRunCommand, LoopTransportCommand, ReadyItem,
+};
+use super::dispatcher::run_runtime_thread;
 use crate::context::{capture_context, clear_running_loop, ensure_running_loop};
 use crate::errors::handle_callback_error;
 use crate::fd_ops::RawFd;
-use crate::runtime::run_runtime_thread;
 use crossbeam_channel::Sender;
 use futures::task::AtomicWaker;
 use pyo3::prelude::*;
@@ -160,12 +163,6 @@ impl Future for WaitForWake {
         Poll::Pending
     }
 }
-
-mod commands;
-pub use commands::{
-    LoopCommand, LoopFutureCommand, LoopIoCommand, LoopRunCommand, LoopSignalCommand,
-    LoopTransportCommand, ReadyItem,
-};
 
 const READY_DRAIN_SLICE: usize = 64;
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -384,7 +381,7 @@ impl LoopCore {
         callback: Py<PyAny>,
         args: Py<PyTuple>,
         context: Option<Py<PyAny>>,
-    ) -> PyResult<Py<crate::callbacks::PyHandle>> {
+    ) -> PyResult<Py<super::callbacks::PyHandle>> {
         profiling::scope!("LoopCore::schedule_callback");
         let (captured, context_needs_run) = capture_context(py, context)?;
         let ready = ReadyCallback::new(
@@ -396,7 +393,7 @@ impl LoopCore {
             captured,
             context_needs_run,
         );
-        let handle = Py::new(py, crate::callbacks::PyHandle::new(ready))?;
+        let handle = Py::new(py, super::callbacks::PyHandle::new(ready))?;
 
         // send_command falls through local enqueue, the active-run pending
         // queue, and finally the runtime command channel.
@@ -627,7 +624,7 @@ impl LoopCore {
                     }
                     ReadyItem::ServerAccepted { server, stream } => {
                         profiling::scope!("ready.server_accepted");
-                        if let Err(err) = crate::stream_transport::spawn_accepted_transport_with_py(
+                        if let Err(err) = crate::transport::stream::spawn_accepted_transport_with_py(
                             py, &server, stream,
                         ) {
                             server.report_error(err, "failed to accept connection");

@@ -1,3 +1,5 @@
+//! Cross-platform raw descriptor and readiness operations.
+
 use std::io;
 
 use pyo3::exceptions::PyRuntimeError;

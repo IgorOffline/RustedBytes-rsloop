@@ -1,3 +1,5 @@
+//! Subprocess lifecycle and pipe transport implementation.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 #[cfg(unix)]
@@ -17,11 +19,11 @@ use pyo3::exceptions::{PyProcessLookupError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use super::stream::spawn_write_pipe_transport;
 use crate::async_event::AsyncEvent;
 use crate::context::{ensure_running_loop, run_in_context};
+use crate::engine::{LoopCommand, LoopCore, LoopTransportCommand};
 use crate::fd_ops;
-use crate::loop_core::{LoopCommand, LoopCore, LoopTransportCommand};
-use crate::stream_transport::spawn_write_pipe_transport;
 
 enum ProcessCommand {
     Close,
@@ -106,11 +108,8 @@ pub struct ProcessTransportParams {
 }
 
 impl ProcessTransportParams {
-    pub fn new(
-        spawn_context: crate::stream_transport::TransportSpawnContext,
-        child: Child,
-    ) -> Self {
-        let crate::stream_transport::TransportSpawnContext {
+    pub fn new(spawn_context: super::stream::TransportSpawnContext, child: Child) -> Self {
+        let super::stream::TransportSpawnContext {
             loop_core,
             loop_obj,
             protocol,
@@ -629,7 +628,7 @@ impl PyProcessTransport {
     }
 
     fn _wait<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let locals = crate::stream_transport::task_locals_for_loop(py, &self.core.loop_obj)?;
+        let locals = super::stream::task_locals_for_loop(py, &self.core.loop_obj)?;
         let core = self.core.clone();
         pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
             loop {
@@ -747,7 +746,7 @@ fn spawn_stdin_pipe_transport(
         .unbind();
     let transport = spawn_write_pipe_transport(
         py,
-        crate::stream_transport::TransportSpawnContext::new(
+        super::stream::TransportSpawnContext::new(
             py,
             core.loop_core.clone(),
             &core.loop_obj,

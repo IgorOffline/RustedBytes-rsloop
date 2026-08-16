@@ -1,3 +1,5 @@
+//! PyO3 event-loop bindings and adapters into the Rust engine.
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(windows)]
@@ -17,29 +19,29 @@ mod ffi_helpers;
 mod pre_exec;
 mod process_handles;
 
-use crate::callbacks::{CallbackKind, PyTimerHandle, ReadyCallback};
 use crate::context::{capture_context, ensure_running_loop, run_in_context};
-use crate::fd_ops;
-use crate::loop_core::FdWatch;
+use crate::engine::FdWatch;
 #[cfg(unix)]
-use crate::loop_core::SignalHandlerTemplate;
-use crate::loop_core::{LoopCommand, LoopCore, LoopCoreError, LoopIoCommand, LoopSignalCommand};
-use crate::process_transport::{
-    BoxedProcessReader, ProcessTextConfig, ProcessTransportParams, spawn_process_transport,
-};
+use crate::engine::SignalHandlerTemplate;
+use crate::engine::{CallbackKind, PyTimerHandle, ReadyCallback};
+use crate::engine::{LoopCommand, LoopCore, LoopCoreError, LoopIoCommand, LoopSignalCommand};
+use crate::fd_ops;
 #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
 use crate::python_names;
-use crate::stream_transport::{
+use crate::transport::process::{
+    BoxedProcessReader, ProcessTextConfig, ProcessTransportParams, spawn_process_transport,
+};
+use crate::transport::stream::{
     PyServer, PyStreamTransport, ServerCreateParams, TransportSpawnContext,
     create_server as create_py_server, spawn_read_pipe_transport, spawn_write_pipe_transport,
     start_tls_transport, tcp_listener_from_owned_socket_fd, tcp_server_listener,
     transport_from_socket, transport_from_socket_server_tls, transport_from_socket_tls,
 };
 #[cfg(unix)]
-use crate::stream_transport::{
+use crate::transport::stream::{
     remove_unix_socket_if_present, unix_listener_from_owned_socket_fd, unix_server_listener,
 };
-use crate::tls::{client_tls_settings, server_tls_settings};
+use crate::transport::tls::{client_tls_settings, server_tls_settings};
 
 const WSAEISCONN: i32 = 10056;
 
@@ -904,7 +906,7 @@ fn fast_sock_connect<'py>(
     // Connect is in progress: watch for writability on this loop's own reactor
     // (loop thread), so the completion is delivered without a cross-thread wake.
     let core = slf.borrow(py).core.clone();
-    if !core.spawn_io(crate::stream_transport::run_connect_watch_task(
+    if !core.spawn_io(crate::transport::stream::run_connect_watch_task(
         Arc::clone(&core),
         fd,
         future.clone_ref(py),
@@ -919,7 +921,7 @@ fn fast_sock_connect<'py>(
 fn listener_sources_from_sockets(
     py: Python<'_>,
     sockets: &[Py<PyAny>],
-) -> PyResult<Vec<crate::stream_transport::ServerListener>> {
+) -> PyResult<Vec<crate::transport::stream::ServerListener>> {
     let mut listeners = Vec::with_capacity(sockets.len());
     for socket in sockets {
         #[cfg(windows)]

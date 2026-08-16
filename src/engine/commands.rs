@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use pyo3::prelude::*;
 
-use crate::callbacks::{PyHandle, ReadyCallback};
+use super::callbacks::{PyHandle, ReadyCallback};
 use crate::fd_ops::RawFd;
-use crate::process_transport::ProcessTransportCore;
-use crate::stream_transport::{
+use crate::transport::process::ProcessTransportCore;
+use crate::transport::stream::{
     AcceptedStream, ReaderTarget, ServerCore, ServerListener, StreamTransportCore,
 };
 

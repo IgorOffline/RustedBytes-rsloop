@@ -1,3 +1,5 @@
+//! Cross-platform conversion between process pipe descriptors and `File`.
+
 use std::fs::File;
 
 use pyo3::exceptions::PyRuntimeError;

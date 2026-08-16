@@ -1,3 +1,5 @@
+//! Callback values and Python handle wrappers used by the loop engine.
+
 use std::sync::{
     Arc, Weak,
     atomic::{AtomicBool, Ordering},

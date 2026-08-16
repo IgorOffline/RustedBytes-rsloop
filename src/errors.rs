@@ -2,7 +2,7 @@ use pyo3::exceptions::{PyBaseException, PyException};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::loop_core::LoopCore;
+use crate::engine::LoopCore;
 
 pub fn handle_callback_error(
     py: Python<'_>,

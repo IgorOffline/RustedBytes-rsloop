@@ -5,7 +5,7 @@ use std::time::Instant;
 pub(super) struct TimerEntry {
     pub(super) when: Instant,
     pub(super) seq: u64,
-    pub(super) callback: Arc<crate::callbacks::ReadyCallback>,
+    pub(super) callback: Arc<super::super::callbacks::ReadyCallback>,
 }
 
 impl PartialEq for TimerEntry {

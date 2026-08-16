@@ -1,3 +1,5 @@
+//! Rustls configuration derived from Python SSL contexts.
+
 use std::sync::Arc;
 use std::time::Duration;
 

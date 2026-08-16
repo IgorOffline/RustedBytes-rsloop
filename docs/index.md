@@ -45,8 +45,8 @@ If you want to read code instead of only using the package, a good path is:
 1. `python/rsloop/_run.py`
 2. `python/rsloop/_loop_compat.py`
 3. `src/lib.rs`
-4. `src/python_api.rs`
-5. `src/loop_core.rs`
+4. `src/bindings/loop_api.rs`
+5. `src/engine/loop_core.rs`
 
 ## What is inside this repository?
 
