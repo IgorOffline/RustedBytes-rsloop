@@ -339,7 +339,6 @@ fn call_callable_noargs(py: Python<'_>, callable: &Py<PyAny>) -> PyResult<Py<PyA
 }
 
 #[inline]
-#[cfg(Py_3_10)]
 fn call_callable_onearg(
     py: Python<'_>,
     callable: &Py<PyAny>,
