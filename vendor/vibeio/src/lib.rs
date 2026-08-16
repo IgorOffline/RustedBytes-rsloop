@@ -100,4 +100,5 @@ mod timer;
 pub mod util;
 
 pub use crate::builder::*;
+pub use crate::driver::RegistrationMode;
 pub use crate::executor::*;

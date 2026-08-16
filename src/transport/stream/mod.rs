@@ -4527,16 +4527,16 @@ pub(crate) async fn run_tcp_socket_reader_task(
 
     // Native fast-stream readers use completion mode. A native server switches
     // to readiness mode when a large response begins.
-    let mut reader =
-        match VibeTcpStream::from_shared(stream, vibeio::driver::RegistrationMode::Completion) {
-            Ok(reader) => reader,
-            Err(err) => {
-                core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
-                    err.to_string(),
-                )));
-                return;
-            }
-        };
+    let mut reader = match VibeTcpStream::from_shared(stream, vibeio::RegistrationMode::Completion)
+    {
+        Ok(reader) => reader,
+        Err(err) => {
+            core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+                err.to_string(),
+            )));
+            return;
+        }
+    };
     let mut buf = Vec::with_capacity(STREAM_READ_BUFFER_SIZE);
 
     loop {
