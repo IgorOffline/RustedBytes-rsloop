@@ -568,6 +568,7 @@ pub struct StreamTransportCore {
     // The extra map is fixed at construction; cache the text-mode marker so
     // the per-write hot path avoids a state lock plus hash lookup.
     has_text_encoding: bool,
+    #[cfg(windows)]
     server_side: bool,
     coalesce_small_server_writes: bool,
 }
@@ -3220,6 +3221,7 @@ fn new_stream_transport_core(
         state_cv: Condvar::new(),
         read_state_notify: AsyncEvent::new(),
         has_text_encoding,
+        #[cfg(windows)]
         server_side,
         coalesce_small_server_writes,
     })
