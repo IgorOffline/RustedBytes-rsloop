@@ -351,7 +351,7 @@ class TlsTests(unittest.TestCase):
         self.assertEqual(rsloop.run(main()), "accepted:socket")
 
     def test_start_tls_upgrades_existing_transport(self) -> None:
-        async def main() -> str:
+        async def main(*, client_first: bool) -> str:
             loop = asyncio.get_running_loop()
             server_upgraded = asyncio.Event()
 
@@ -424,15 +424,22 @@ class TlsTests(unittest.TestCase):
                     while not server_protocols:
                         await asyncio.sleep(0.01)
                     await asyncio.wait_for(server_protocols[0].connected.wait(), 5.0)
-                    await asyncio.gather(
-                        server_protocols[0].upgrade(server_ctx),
-                        client_protocol.upgrade(client_ctx),
+                    server_upgrade = server_protocols[0].upgrade(server_ctx)
+                    client_upgrade = client_protocol.upgrade(client_ctx)
+                    upgrades = (
+                        (client_upgrade, server_upgrade)
+                        if client_first
+                        else (server_upgrade, client_upgrade)
                     )
+                    await asyncio.gather(*upgrades)
                     return await asyncio.wait_for(client_protocol.done, 5.0)
                 finally:
                     server.close()
 
-        self.assertEqual(rsloop.run(main()), "upgraded:starttls")
+        # Both scheduling orders must retire plaintext readers before either
+        # side can put handshake bytes on the socket.
+        self.assertEqual(rsloop.run(main(client_first=False)), "upgraded:starttls")
+        self.assertEqual(rsloop.run(main(client_first=True)), "upgraded:starttls")
 
     @unittest.skipIf(
         importlib.util.find_spec("websockets") is None,

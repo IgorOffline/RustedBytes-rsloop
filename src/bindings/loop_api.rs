@@ -33,9 +33,10 @@ use crate::transport::process::{
 };
 use crate::transport::stream::{
     PyServer, PyStreamTransport, ServerCreateParams, TransportSpawnContext,
-    create_server as create_py_server, spawn_read_pipe_transport, spawn_write_pipe_transport,
-    start_tls_transport, tcp_listener_from_owned_socket_fd, tcp_server_listener,
-    transport_from_socket, transport_from_socket_server_tls, transport_from_socket_tls,
+    create_server as create_py_server, prepare_start_tls_transport, spawn_read_pipe_transport,
+    spawn_write_pipe_transport, start_tls_transport, tcp_listener_from_owned_socket_fd,
+    tcp_server_listener, transport_from_socket, transport_from_socket_server_tls,
+    transport_from_socket_tls,
 };
 #[cfg(unix)]
 use crate::transport::stream::{
@@ -2609,37 +2610,42 @@ impl PyLoop {
     ) -> PyResult<Bound<'_, PyAny>> {
         profiling::scope!("PyLoop::start_tls");
         let locals = Self::task_locals(py, &slf)?;
+        let locals_for_barrier = locals.clone();
         let transport: Py<PyStreamTransport> = transport.extract(py)?;
+        let client_tls = if server_side {
+            None
+        } else {
+            Some(client_tls_settings(
+                py,
+                sslcontext.bind(py),
+                server_hostname.as_ref().map(|value| value.bind(py)),
+                ssl_handshake_timeout,
+                ssl_shutdown_timeout,
+            )?)
+        };
+        let server_tls = if server_side {
+            Some(server_tls_settings(
+                py,
+                sslcontext.bind(py),
+                ssl_handshake_timeout,
+                ssl_shutdown_timeout,
+            )?)
+        } else {
+            None
+        };
+        // Stop plaintext I/O while still on the calling loop turn. The Rust
+        // future below yields once before either peer can start its handshake.
+        let prepared = prepare_start_tls_transport(py, transport, protocol)?;
         pyo3_async_runtimes::async_std::future_into_py_with_locals(py, locals, async move {
+            let barrier = Python::attach(|py| {
+                let sleep = py.import("asyncio")?.getattr("sleep")?.call1((0,))?;
+                pyo3_async_runtimes::into_future_with_locals(&locals_for_barrier, sleep)
+            })?;
+            let _ = barrier.await?;
+
             let upgraded = async_std::task::spawn_blocking(move || -> PyResult<Py<PyAny>> {
                 Python::attach(|py| {
-                    let sslcontext = sslcontext.clone_ref(py);
-                    let protocol = protocol.clone_ref(py);
-                    let transport = transport.clone_ref(py);
-                    let server_hostname = server_hostname.as_ref().map(|value| value.clone_ref(py));
-                    let client_tls = if server_side {
-                        None
-                    } else {
-                        Some(client_tls_settings(
-                            py,
-                            sslcontext.bind(py),
-                            server_hostname.as_ref().map(|value| value.bind(py)),
-                            ssl_handshake_timeout,
-                            ssl_shutdown_timeout,
-                        )?)
-                    };
-                    let server_tls = if server_side {
-                        Some(server_tls_settings(
-                            py,
-                            sslcontext.bind(py),
-                            ssl_handshake_timeout,
-                            ssl_shutdown_timeout,
-                        )?)
-                    } else {
-                        None
-                    };
-                    let upgraded =
-                        start_tls_transport(py, transport, protocol, client_tls, server_tls)?;
+                    let upgraded = start_tls_transport(py, prepared, client_tls, server_tls)?;
                     Ok(upgraded.into_any())
                 })
             })

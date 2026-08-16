@@ -413,7 +413,6 @@ struct StreamTransportState {
     lost_called: bool,
     writer_registered: bool,
     write_buffer: StreamWriteBufferState,
-    detached: bool,
     server: Option<Weak<ServerCore>>,
 }
 
@@ -445,6 +444,7 @@ pub struct StreamTransportCore {
     pending_read_bytes: AtomicUsize,
     read_events_scheduled: AtomicBool,
     reading: AtomicBool,
+    detached: AtomicBool,
     writer_tx: Sender<WriterCommand>,
     direct_writer: Option<Mutex<TaskedDirectWriter>>,
     pending_direct_write: Mutex<Vec<u8>>,
@@ -1041,6 +1041,12 @@ impl StreamTransportCore {
 
     fn enqueue_pending_read_event(self: &Arc<Self>, event: PendingReadEvent) {
         profiling::scope!("StreamTransportCore::enqueue_pending_read_event");
+        // A start_tls handoff retires this core before reusing the socket. A
+        // cancelled plaintext reader may still complete once; never deliver
+        // that late event to the application protocol after the handoff.
+        if self.detached.load(Ordering::Acquire) {
+            return;
+        }
         let data_len = match &event {
             PendingReadEvent::Data(data) => data.len(),
             _ => 0,
@@ -1548,7 +1554,7 @@ impl StreamTransportCore {
         profiling::scope!("StreamTransportCore::connection_lost_with_py");
         let (callback, fast_path, context, context_needs_run, server) = {
             let mut state = self.state.lock().expect("poisoned transport state");
-            if state.detached {
+            if self.detached.load(Ordering::Acquire) {
                 state.lost_called = true;
                 return Ok(());
             }
@@ -1660,9 +1666,9 @@ impl StreamTransportCore {
     }
 
     fn detach_underlying_stream(&self, py: Python<'_>) {
+        self.detached.store(true, Ordering::Release);
         self.close_extra_socket_with_py(py);
         let mut state = self.state.lock().expect("poisoned transport state");
-        state.detached = true;
         state.closing = true;
         state.reading = false;
         state.writable = false;
@@ -2816,16 +2822,37 @@ pub fn transport_from_socket_server_tls(
     )
 }
 
-pub fn start_tls_transport(
+pub struct PreparedTlsTransport {
+    spawn_context: TransportSpawnContext,
+    stream: StreamKind,
+}
+
+/// Retires plaintext I/O before a TLS handshake is allowed to touch the socket.
+pub fn prepare_start_tls_transport(
     py: Python<'_>,
     transport: Py<PyStreamTransport>,
     protocol: Py<PyAny>,
+) -> PyResult<PreparedTlsTransport> {
+    profiling::scope!("stream.prepare_start_tls_transport");
+    let (mut spawn_context, stream) = transport.borrow(py).core.upgrade_stream(py)?;
+    spawn_context.protocol = protocol;
+    Ok(PreparedTlsTransport {
+        spawn_context,
+        stream,
+    })
+}
+
+pub fn start_tls_transport(
+    py: Python<'_>,
+    prepared: PreparedTlsTransport,
     client_tls: Option<ClientTlsSettings>,
     server_tls: Option<ServerTlsSettings>,
 ) -> PyResult<Py<PyStreamTransport>> {
     profiling::scope!("stream.start_tls_transport");
-    let (mut spawn_context, stream) = transport.borrow(py).core.upgrade_stream(py)?;
-    spawn_context.protocol = protocol;
+    let PreparedTlsTransport {
+        spawn_context,
+        stream,
+    } = prepared;
     match (client_tls, server_tls) {
         (Some(tls), None) => spawn_tls_client_transport(py, spawn_context, stream, tls, None, true),
         (None, Some(tls)) => spawn_tls_server_transport(py, spawn_context, stream, tls, None, true),
@@ -2946,7 +2973,6 @@ fn stream_transport_state_parts(
             lost_called: false,
             writer_registered: false,
             write_buffer: StreamWriteBufferState::default(),
-            detached: false,
             server: config.server,
         },
     }
@@ -2974,6 +3000,7 @@ fn new_stream_transport_core(
         pending_read_bytes: AtomicUsize::new(0),
         read_events_scheduled: AtomicBool::new(false),
         reading: AtomicBool::new(reading),
+        detached: AtomicBool::new(false),
         writer_tx,
         direct_writer: direct_writer.map(Mutex::new),
         pending_direct_write: Mutex::new(Vec::new()),
