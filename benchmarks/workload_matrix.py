@@ -438,9 +438,7 @@ async def run_websocket_messages(
     server_ssl = client_ssl = None
     if use_tls:
         server_ssl, client_ssl = tls_contexts(args.tls_dir)
-    server = await asyncio.start_server(
-        echo, "127.0.0.1", 0, ssl=server_ssl
-    )
+    server = await asyncio.start_server(echo, "127.0.0.1", 0, ssl=server_ssl)
     host, port = server.sockets[0].getsockname()[:2]
     latencies: list[float] = []
 
@@ -655,9 +653,7 @@ async def run_library_websocket_messages(
     started = time.perf_counter()
     setup_finished = traffic_finished = started
     try:
-        opened = await asyncio.gather(
-            *(open_client() for _ in range(args.concurrency))
-        )
+        opened = await asyncio.gather(*(open_client() for _ in range(args.concurrency)))
         setup_finished = time.perf_counter()
         transferred = sum(
             await asyncio.gather(
@@ -938,7 +934,9 @@ def run_with_loop(loop_name: str, awaitable: Awaitable[MatrixResult]) -> MatrixR
 
 def child_main(args: argparse.Namespace) -> int:
     connection_count = (
-        args.idle_connections if args.scenario == "idle_connections" else args.concurrency
+        args.idle_connections
+        if args.scenario == "idle_connections"
+        else args.concurrency
     )
     ensure_idle_connection_capacity(connection_count)
 

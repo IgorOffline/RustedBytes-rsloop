@@ -43,9 +43,7 @@ def load_metrics(path: Path) -> dict[str, dict[str, float]]:
         if not isinstance(name, str) or not runs:
             continue
         if "latency_ms" in runs[0]:
-            throughput = median(
-                [run["operations"] / run["seconds"] for run in runs]
-            )
+            throughput = median([run["operations"] / run["seconds"] for run in runs])
             p95 = median([percentile(run["latency_ms"], 0.95) for run in runs])
             p99 = median([percentile(run["latency_ms"], 0.99) for run in runs])
         else:
@@ -87,7 +85,9 @@ def main() -> int:
         p99 = percent_change(old["p99"], new["p99"])
         rss = percent_change(old["rss"], new["rss"])
         best_improvement = max(best_improvement, throughput)
-        print(f"{name:<24} {throughput:>+11.2f}% {p95:>+9.2f}% {p99:>+9.2f}% {rss:>+9.2f}%")
+        print(
+            f"{name:<24} {throughput:>+11.2f}% {p95:>+9.2f}% {p99:>+9.2f}% {rss:>+9.2f}%"
+        )
         if throughput < -args.throughput_regression:
             failures.append(f"{name}: throughput regressed {-throughput:.2f}%")
         for metric, change in (("p95", p95), ("p99", p99)):
