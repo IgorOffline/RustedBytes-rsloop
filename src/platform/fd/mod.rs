@@ -220,16 +220,10 @@ pub fn socket_so_error(fd: RawFd) -> io::Result<i32> {
     let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>()
         .try_into()
         .expect("socklen_t can represent c_int size");
-    // SAFETY: `fd` is a socket descriptor and `value`/`len` describe a correctly
-    // sized `c_int`/`socklen_t` that `getsockopt` fills in.
-    let result = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_ERROR,
-            (&mut value as *mut libc::c_int).cast(),
-            &mut len,
-        )
+    let value_ptr = (&mut value as *mut libc::c_int).cast();
+    let result = {
+        // SAFETY: `fd` is a socket and the correctly sized out-parameters live for the call.
+        unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ERROR, value_ptr, &mut len) }
     };
     if result == 0 {
         Ok(value)

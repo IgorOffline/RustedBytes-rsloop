@@ -129,8 +129,7 @@ pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Resul
     } else {
         std::ptr::null_mut()
     };
-    // SAFETY: The fd sets and timeout live for the duration of the call. Null pointers are passed
-    // for disabled interests as required by winsock `select`.
+    // SAFETY: the fd sets and timeout live for the call; disabled interests use null pointers.
     let ready =
         unsafe { winsock_select(0, readfds_ptr, writefds_ptr, &mut exceptfds, &mut timeout) };
     if ready == SOCKET_ERROR {
@@ -179,17 +178,10 @@ fn socket_type(socket: SOCKET) -> io::Result<i32> {
     let mut len = mem::size_of_val(&socket_type)
         .try_into()
         .expect("socket type length fits in i32");
+    let value_ptr = (&mut socket_type as *mut i32).cast();
     // SAFETY: `socket_type` and `len` are valid out-parameters for Winsock `getsockopt`, and
     // the socket handle is only borrowed for the duration of the call.
-    let result = unsafe {
-        winsock_getsockopt(
-            socket,
-            SOL_SOCKET,
-            SO_TYPE,
-            (&mut socket_type as *mut i32).cast(),
-            &mut len,
-        )
-    };
+    let result = unsafe { winsock_getsockopt(socket, SOL_SOCKET, SO_TYPE, value_ptr, &mut len) };
     if result == SOCKET_ERROR {
         return Err(io::Error::last_os_error());
     }

@@ -750,16 +750,10 @@ fn connect_so_error(fd: fd_ops::RawFd, sock: &Py<PyAny>) -> PyResult<i32> {
         let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>()
             .try_into()
             .expect("socklen_t can represent c_int size");
-        // SAFETY: `fd` is a live socket descriptor and `value`/`len` point to a
-        // correctly sized `c_int`/`socklen_t` that `getsockopt` fills in.
-        let result = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&mut value as *mut libc::c_int).cast(),
-                &mut len,
-            )
+        let value_ptr = (&mut value as *mut libc::c_int).cast();
+        let result = {
+            // SAFETY: `fd` is a live socket and the out-parameters remain valid for the call.
+            unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_ERROR, value_ptr, &mut len) }
         };
         if result == 0 {
             Ok(value)

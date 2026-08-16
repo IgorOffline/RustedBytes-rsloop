@@ -1,6 +1,7 @@
 threads = 0
 exclude_paths = [
     "target",
+    "vendor",
     ".git",
     "node_modules",
 ]

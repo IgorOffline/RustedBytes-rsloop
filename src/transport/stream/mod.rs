@@ -870,6 +870,7 @@ impl StreamTransportCore {
             // rebinding the same socket to readiness mode. Cancel before the
             // direct write so a pending receive cannot throttle the duplicate
             // writer socket during a bulk response.
+            // SAFETY: `fd` is the live transport handle; a null OVERLAPPED requests all pending IO.
             let _ = unsafe { CancelIoEx(fd as HANDLE, std::ptr::null()) };
         }
     }
@@ -3505,6 +3506,7 @@ async fn run_tcp_accept_task(server: Arc<ServerCore>, listener: StdTcpListener) 
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 #[cfg(unix)]
+                // SAFETY: `into_raw_fd` transfers sole ownership to `StdTcpStream`.
                 let stream = unsafe { StdTcpStream::from_raw_fd(stream.into_raw_fd()) };
                 #[cfg(windows)]
                 let raw = stream.into_raw_socket();
@@ -3599,6 +3601,7 @@ async fn run_unix_accept_task(server: Arc<ServerCore>, listener: StdUnixListener
 
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // SAFETY: `into_raw_fd` transfers sole ownership to `StdUnixStream`.
                 let stream = unsafe { StdUnixStream::from_raw_fd(stream.into_raw_fd()) };
                 if !configure_accepted_unix_stream(
                     &server,

@@ -178,6 +178,7 @@ impl ExactReadAccumulator {
         if ptr.is_null() {
             return Err(PyErr::fetch(py));
         }
+        // SAFETY: `ptr` is a newly owned bytes object of the expected concrete type.
         let value = unsafe {
             Bound::<PyAny>::from_owned_ptr(py, ptr)
                 .cast_into_unchecked::<PyBytes>()
@@ -406,10 +407,8 @@ impl PyFastStreamReader {
             return Ok(());
         }
 
-        if let Some(exact) = self
-            .waiter
-            .as_mut()
-            .and_then(|waiter| waiter.exact.as_mut())
+        if let Some(waiter) = &mut self.waiter
+            && let Some(exact) = &mut waiter.exact
         {
             exact.fill_from(&mut self.buffer);
         }
@@ -486,10 +485,8 @@ impl PyFastStreamReader {
             kind,
             exact,
         });
-        if let Some(exact) = self
-            .waiter
-            .as_mut()
-            .and_then(|waiter| waiter.exact.as_mut())
+        if let Some(waiter) = &mut self.waiter
+            && let Some(exact) = &mut waiter.exact
         {
             exact.fill_from(&mut self.buffer);
         }
