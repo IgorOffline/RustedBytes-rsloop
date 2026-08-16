@@ -24,6 +24,10 @@ Options:
 Environment:
   RSLOOP_PYTHON_VERSIONS    Space-separated version list to override the defaults
                             (default: 3.10 3.11 3.12 3.13 3.14 3.14t)
+  RSLOOP_TEST_TIMEOUT_SECONDS
+                            Hard limit for one Python test suite (default: 300)
+  RSLOOP_TEST_TRACEBACK_INTERVAL_SECONDS
+                            Interval between stalled-test stack dumps (default: 60)
 
 Examples:
   scripts/test-supported-pythons.sh
@@ -81,22 +85,38 @@ for version in "${PYTHON_VERSIONS[@]}"; do
     --python "$version" \
     --with maturin \
     python - "$ROOT_DIR" "$BUILD_MODE" <<'PY'
+import os
 import subprocess
 import sys
 
 root_dir = sys.argv[1]
 build_mode = sys.argv[2]
+try:
+    test_timeout = int(os.environ.get("RSLOOP_TEST_TIMEOUT_SECONDS", "300"))
+except ValueError as exc:
+    raise SystemExit("RSLOOP_TEST_TIMEOUT_SECONDS must be an integer") from exc
+if test_timeout <= 0:
+    raise SystemExit("RSLOOP_TEST_TIMEOUT_SECONDS must be greater than zero")
 
 maturin_cmd = ["maturin", "develop"]
 if build_mode == "release":
     maturin_cmd.append("--release")
 
 subprocess.run(maturin_cmd, cwd=root_dir, check=True)
-subprocess.run(
-    [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-    cwd=root_dir,
-    check=True,
-)
+try:
+    subprocess.run(
+        [sys.executable, "-u", "scripts/run_python_tests.py"],
+        cwd=root_dir,
+        check=True,
+        timeout=test_timeout,
+    )
+except subprocess.TimeoutExpired:
+    print(
+        f"Test suite exceeded the {test_timeout}-second limit",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise
 PY
 done
 

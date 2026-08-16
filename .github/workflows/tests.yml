@@ -27,6 +27,7 @@ jobs:
   clippy:
     name: clippy (pedantic)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -53,6 +54,7 @@ jobs:
   type-check:
     name: pyright
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -78,6 +80,7 @@ jobs:
   test-matrix:
     name: test matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -131,7 +134,7 @@ jobs:
     name: ${{ matrix.os_name }} / Python ${{ matrix.python_version }}
     needs: test-matrix
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.test-matrix.outputs.matrix) }}
@@ -164,13 +167,14 @@ jobs:
           cache-targets: false
 
       - name: Run tests for Python ${{ matrix.python_version }}
-        timeout-minutes: 50
+        timeout-minutes: 15
         shell: bash
         env:
           RSLOOP_PYTHON_VERSIONS: ${{ matrix.python_version }}
           RSLOOP_BUILD_MODE: ${{ inputs.build_mode || 'debug' }}
         run: |
-          args=()
+          # setup-uv has already installed this matrix entry's interpreter.
+          args=(--skip-python-install)
           if [[ "$RSLOOP_BUILD_MODE" == "debug" ]]; then
             args+=(--debug)
           fi

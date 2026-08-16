@@ -497,7 +497,9 @@ class CompatibilityTests(unittest.TestCase):
                 conn.sendall(b"external-socket-data")
             server.close()
 
-        thread = threading.Thread(target=serve_once)
+        # A failed connection must not leave an accept thread keeping the test
+        # process alive after its timeout diagnostics have been printed.
+        thread = threading.Thread(target=serve_once, daemon=True)
         thread.start()
         ready.wait(1.0)
 
@@ -520,9 +522,10 @@ class CompatibilityTests(unittest.TestCase):
         try:
             received, elapsed = rsloop.run(main())
         finally:
-            thread.join(1.0)
             server.close()
+            thread.join(1.0)
 
+        self.assertFalse(thread.is_alive(), "socket server thread did not finish")
         self.assertEqual(received, b"external-socket-data")
         self.assertLess(elapsed, 0.5)
 
@@ -1074,10 +1077,11 @@ class CompatibilityTests(unittest.TestCase):
                 except BaseException as exc:
                     errors.append(exc)
 
-            thread = threading.Thread(target=worker)
+            thread = threading.Thread(target=worker, daemon=True)
             thread.start()
-            thread.join()
+            thread.join(2.0)
 
+            self.assertFalse(thread.is_alive(), "signal worker did not finish")
             self.assertEqual(len(errors), 1)
             self.assertIsInstance(errors[0], ValueError)
             self.assertIn("main thread", str(errors[0]))

@@ -9,10 +9,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: wheels-${{ github.ref }}
+  # Repeated manual builds supersede one another; tagged releases must finish.
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
 jobs:
   build-wheels:
     name: ${{ matrix.os_name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       # The profiler retains state for every short-lived readiness worker, so it
@@ -62,10 +68,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build wheels
+        timeout-minutes: 75
         shell: bash
         env:
           RSLOOP_PYTHON_VERSIONS: ${{ matrix.python_versions }}
-        run: scripts/build-wheels.sh --out dist --target "${{ matrix.rust_target }}" -- ${{ matrix.maturin_args }}
+        run: scripts/build-wheels.sh --out dist --target "${{ matrix.rust_target }}"
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
@@ -77,6 +84,7 @@ jobs:
   build-sdist:
     name: sdist
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -100,6 +108,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build source distribution
+        timeout-minutes: 10
         run: uv run --no-project --with maturin maturin sdist --out dist
 
       - name: Upload source distribution
@@ -116,6 +125,7 @@ jobs:
       - build-wheels
       - build-sdist
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
@@ -138,6 +148,7 @@ jobs:
     needs:
       - build-wheels
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

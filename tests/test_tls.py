@@ -431,7 +431,7 @@ class TlsTests(unittest.TestCase):
                         if client_first
                         else (server_upgrade, client_upgrade)
                     )
-                    await asyncio.gather(*upgrades)
+                    await asyncio.wait_for(asyncio.gather(*upgrades), 15.0)
                     return await asyncio.wait_for(client_protocol.done, 5.0)
                 finally:
                     server.close()

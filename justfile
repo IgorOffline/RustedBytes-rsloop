@@ -14,7 +14,7 @@ clippy:
     cargo clippy --all-targets --all-features -- -D warnings
 
 test: tls-test-certs
-    uv run python -m unittest discover -s tests
+    uv run python -u scripts/run_python_tests.py
 
 test-frameworks:
     uv run --with uvicorn python tests/packages/uvicorn_test.py
