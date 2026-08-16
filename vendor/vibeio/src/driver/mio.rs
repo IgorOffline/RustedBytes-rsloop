@@ -5,7 +5,14 @@ use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
-use mio::{Events, Interest, Poll, Registry, Token, Waker as MioWaker};
+#[cfg(target_vendor = "apple")]
+use std::os::fd::AsRawFd;
+#[cfg(target_vendor = "apple")]
+use std::os::unix::net::UnixDatagram;
+
+#[cfg(not(target_vendor = "apple"))]
+use mio::Waker as MioWaker;
+use mio::{Events, Interest, Poll, Registry, Token};
 use slab::Slab;
 
 use crate::driver::Interruptor;
@@ -17,6 +24,7 @@ use crate::{driver::Driver, fd_inner::InnerRawHandle};
 // Re-polling once per day preserves those far-future deadlines without
 // passing an invalid timeout to the operating system.
 const MAX_POLL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const WAKE_TOKEN: Token = Token(usize::MAX);
 
 #[inline]
 fn bounded_poll_timeout(timeout: Option<Duration>) -> Option<Duration> {
@@ -24,7 +32,7 @@ fn bounded_poll_timeout(timeout: Option<Duration>) -> Option<Duration> {
 }
 
 pub struct MioInterruptor {
-    waker: std::sync::Weak<MioWaker>,
+    waker: std::sync::Weak<DriverWaker>,
 }
 
 impl Interruptor for MioInterruptor {
@@ -32,6 +40,73 @@ impl Interruptor for MioInterruptor {
     fn interrupt(&self) {
         if let Some(waker) = self.waker.upgrade() {
             let _ = waker.wake();
+        }
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+struct DriverWaker(MioWaker);
+
+#[cfg(not(target_vendor = "apple"))]
+impl DriverWaker {
+    fn new(registry: &Registry) -> io::Result<Self> {
+        MioWaker::new(registry, WAKE_TOKEN).map(Self)
+    }
+
+    #[inline]
+    fn wake(&self) -> io::Result<()> {
+        self.0.wake()
+    }
+
+    #[inline]
+    fn acknowledge(&self) {}
+}
+
+/// Apple kqueue wake source whose readiness remains observable until the
+/// driver drains it. This avoids relying on EVFILT_USER delivery for
+/// cross-thread runtime and event-loop notifications.
+#[cfg(target_vendor = "apple")]
+struct DriverWaker {
+    sender: UnixDatagram,
+    receiver: UnixDatagram,
+}
+
+#[cfg(target_vendor = "apple")]
+impl DriverWaker {
+    fn new(registry: &Registry) -> io::Result<Self> {
+        let (sender, receiver) = UnixDatagram::pair()?;
+        sender.set_nonblocking(true)?;
+        receiver.set_nonblocking(true)?;
+        let receiver_fd = receiver.as_raw_fd();
+        registry.register(
+            &mut mio::unix::SourceFd(&receiver_fd),
+            WAKE_TOKEN,
+            Interest::READABLE,
+        )?;
+        Ok(Self { sender, receiver })
+    }
+
+    #[inline]
+    fn wake(&self) -> io::Result<()> {
+        match self.sender.send(&[1]) {
+            Ok(_) => Ok(()),
+            // A full socket is already readable and therefore already carries
+            // the wake notification we need.
+            Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(()),
+            Err(err) if err.kind() == ErrorKind::Interrupted => self.wake(),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn acknowledge(&self) {
+        let mut buffer = [0_u8; 256];
+        loop {
+            match self.receiver.recv(&mut buffer) {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => return,
+                Err(_) => return,
+            }
         }
     }
 }
@@ -51,7 +126,7 @@ pub struct MioDriver {
     registry: Registry,
     events: RefCell<Events>,
     state: RefCell<DriverState>,
-    waker: Arc<MioWaker>,
+    waker: Arc<DriverWaker>,
 }
 
 impl MioDriver {
@@ -59,7 +134,7 @@ impl MioDriver {
     pub(crate) fn new() -> Result<Self, io::Error> {
         let poll = Poll::new()?;
         let registry = poll.registry().try_clone()?;
-        let waker = MioWaker::new(&registry, Token(usize::MAX))?;
+        let waker = DriverWaker::new(&registry)?;
 
         Ok(Self {
             poll: RefCell::new(poll),
@@ -96,7 +171,8 @@ impl MioDriver {
             let mut state = self.state.borrow_mut();
             for event in events.iter() {
                 // Check if this is an interrupt event
-                if event.token().0 == usize::MAX {
+                if event.token() == WAKE_TOKEN {
+                    self.waker.acknowledge();
                     continue;
                 }
 
@@ -244,6 +320,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{bounded_poll_timeout, MioDriver, MAX_POLL_TIMEOUT};
+    use crate::driver::{Driver, Interruptor};
 
     #[test]
     fn poll_timeout_is_bounded_for_platform_selectors() {
@@ -333,5 +410,34 @@ mod tests {
 
         driver.wait(Some(Duration::from_millis(100)));
         assert_eq!(wake.wake_count(), 1);
+    }
+
+    #[test]
+    fn repeated_cross_thread_interrupts_wake_driver() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let driver = MioDriver::new().expect("mio driver should initialize");
+        let interruptor = driver.get_interruptor();
+        let (request_tx, request_rx) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            while request_rx.recv().is_ok() {
+                interruptor.interrupt();
+            }
+        });
+
+        let started = std::time::Instant::now();
+        for _ in 0..5_000 {
+            request_tx.send(()).expect("interrupt worker stopped");
+            driver.wait(Some(Duration::from_millis(100)));
+        }
+
+        drop(request_tx);
+        worker.join().expect("interrupt worker panicked");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cross-thread interrupt stress run took {:?}",
+            started.elapsed()
+        );
     }
 }

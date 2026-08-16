@@ -308,9 +308,7 @@ async def run_http(
         clients.append(connection)
         return connection
 
-    async def client(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> int:
+    async def client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
         transferred = 0
         for _ in range(args.requests_per_connection):
             started = time.perf_counter()
