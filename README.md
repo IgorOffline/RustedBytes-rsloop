@@ -22,9 +22,7 @@ The package exposes:
 - `rsloop.Loop`, `rsloop.EventLoopPolicy`, `rsloop.new_event_loop()`,
   `rsloop.run(...)`, `rsloop.install()`, and `rsloop.uninstall()`
 
-Repository metadata currently targets Python `>=3.8`. The packaged project now
-supports the core event-loop surface on Linux, macOS, and Windows, including
-Windows pipe transports and subprocess workflows.
+Repository metadata currently targets Python `>=3.8`. 
 
 ## Documentation
 
