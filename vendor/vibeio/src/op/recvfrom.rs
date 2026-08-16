@@ -287,6 +287,7 @@ impl<B: IoBufMut> Op for RecvfromOp<'_, B> {
         if result < 0 {
             return Poll::Ready(Err(io::Error::from_raw_os_error(-result)));
         }
+        #[cfg(any(target_os = "linux", windows))]
         let read = result as usize;
 
         #[cfg(target_os = "linux")]
@@ -303,10 +304,10 @@ impl<B: IoBufMut> Op for RecvfromOp<'_, B> {
 
         #[cfg(all(unix, not(target_os = "linux")))]
         {
-            return Poll::Ready(Err(io::Error::new(
+            Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "completion-based recvfrom is unsupported on this Unix platform",
-            )));
+            )))
         }
 
         #[cfg(windows)]
@@ -323,7 +324,7 @@ impl<B: IoBufMut> Op for RecvfromOp<'_, B> {
                 .and_then(|state| sockaddr_storage_to_socketaddr(&state.addr));
             let buf = self.buf.as_mut().unwrap().as_mut();
             unsafe { buf.set_buf_init(read) };
-            return Poll::Ready(address.map(|address| (read, address)));
+            Poll::Ready(address.map(|address| (read, address)))
         }
     }
 

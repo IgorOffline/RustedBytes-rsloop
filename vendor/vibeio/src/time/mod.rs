@@ -117,14 +117,17 @@ mod tests {
     fn interval_catchup_returns_multiple() {
         let rt = crate::executor::Runtime::new(AnyDriver::new_mock());
         rt.block_on(async {
-            let mut interval = Interval::new(Duration::from_millis(1));
+            let mut interval = Interval::new(Duration::from_millis(100));
             interval.set_missed_tick_behavior(MissedTickBehavior::CatchUp);
             // Initialise baseline
             let _ = interval.tick().await;
             // Artificially push next_deadline into the past to simulate missed ticks
-            interval.next_deadline = Some(Instant::now() - Duration::from_millis(10));
+            interval.next_deadline = Some(Instant::now() - Duration::from_millis(1_050));
             let missed = interval.tick().await;
-            assert!(missed >= 1);
+            assert_eq!(missed, 11);
+            let next = interval.next_deadline.expect("next deadline");
+            assert!(next > Instant::now());
+            assert!(next <= Instant::now() + Duration::from_millis(100));
         });
     }
 }

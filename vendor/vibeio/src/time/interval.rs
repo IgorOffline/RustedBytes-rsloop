@@ -4,6 +4,15 @@ use std::time::{Duration, Instant};
 
 use super::sleep::Sleep;
 
+#[inline]
+fn duration_remainder(duration: Duration, divisor: Duration) -> Duration {
+    let remainder = duration.as_nanos() % divisor.as_nanos();
+    Duration::new(
+        (remainder / 1_000_000_000) as u64,
+        (remainder % 1_000_000_000) as u32,
+    )
+}
+
 /// How to handle missed ticks for `Interval`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissedTickBehavior {
@@ -75,18 +84,11 @@ impl Interval {
                     if self.period.as_nanos() == 0 {
                         target = now;
                     } else {
-                        // Advance by whole periods until target > now.
-                        // Use a loop; the number of iterations is typically small.
-                        let mut cnt: u64 = 0;
-                        while target <= now {
-                            target += self.period;
-                            cnt = cnt.saturating_add(1);
-                            // Safety: in pathological cases we break after huge iterations,
-                            // but such large loops are unlikely in practice.
-                            if cnt == u64::MAX {
-                                break;
-                            }
-                        }
+                        // Advance directly to the first cadence boundary after
+                        // `now`; iterating once per missed period can otherwise
+                        // make an old interval stall the executor.
+                        let elapsed = now.duration_since(target);
+                        target = now + (self.period - duration_remainder(elapsed, self.period));
                     }
                 }
 
@@ -124,17 +126,15 @@ impl Interval {
                     }
 
                     let elapsed = now.duration_since(base_next);
-                    let missed = (elapsed.as_nanos() / self.period.as_nanos()) as u64 + 1;
+                    let missed = (elapsed.as_nanos() / self.period.as_nanos())
+                        .saturating_add(1)
+                        .min(u64::MAX as u128) as u64;
 
-                    // Advance base_next by `missed` periods to compute the next deadline.
-                    let mut new_next = base_next;
-                    // loop to add period missed times
-                    for _ in 0..missed {
-                        new_next += self.period;
-                    }
-
-                    // Set next_deadline to the instant after the catch-up window.
-                    self.next_deadline = Some(new_next + self.period);
+                    // The next deadline is the first cadence boundary after
+                    // `now`. `missed` already accounts for the tick at
+                    // `base_next`, so adding another period would skip a tick.
+                    let new_next = now + (self.period - duration_remainder(elapsed, self.period));
+                    self.next_deadline = Some(new_next);
 
                     // Return the number of missed ticks so caller can catch up.
                     missed

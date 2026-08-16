@@ -8,7 +8,7 @@
 //!
 //! `IoBuf` is implemented for:
 //! - `Vec<u8>`
-//! - `String`
+//! - `String` (read-only)
 //! - `&'static [u8]`
 //! - `&'static str`
 //! - `[u8; N]` for any size `N`
@@ -16,7 +16,6 @@
 //!
 //! `IoBufMut` is implemented for:
 //! - `Vec<u8>`
-//! - `String`
 //! - `[u8; N]` for any size `N`
 //! - `Box<[u8]>`
 //!
@@ -39,7 +38,12 @@ use std::io::{IoSlice, IoSliceMut};
 ///
 /// This trait is implemented by types that can be used as buffers for
 /// reading data in async I/O operations.
-pub trait IoBuf: Send + 'static {
+/// # Safety
+///
+/// Implementors must keep the returned pointer valid and stable for reads of
+/// `buf_len()` bytes while the buffer is owned by an I/O operation. The
+/// reported length must not exceed `buf_capacity()`.
+pub unsafe trait IoBuf: Send + 'static {
     /// Returns a raw pointer to the inner buffer.
     fn as_buf_ptr(&self) -> *const u8;
 
@@ -53,7 +57,12 @@ pub trait IoBuf: Send + 'static {
 /// Trait for mutable buffers.
 ///
 /// This trait extends `IoBuf` with mutable operations needed for writing.
-pub trait IoBufMut: IoBuf {
+/// # Safety
+///
+/// In addition to the [`IoBuf`] requirements, the mutable pointer must remain
+/// valid and stable for writes of `buf_capacity()` bytes. `set_buf_init` must
+/// only expose bytes initialized by the completed operation.
+pub unsafe trait IoBufMut: IoBuf {
     /// Returns a raw mutable pointer to the inner buffer.
     fn as_buf_mut_ptr(&mut self) -> *mut u8;
 
@@ -66,7 +75,7 @@ pub trait IoBufMut: IoBuf {
     unsafe fn set_buf_init(&mut self, len: usize);
 }
 
-impl IoBuf for Vec<u8> {
+unsafe impl IoBuf for Vec<u8> {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.as_ptr()
@@ -83,7 +92,7 @@ impl IoBuf for Vec<u8> {
     }
 }
 
-impl IoBufMut for Vec<u8> {
+unsafe impl IoBufMut for Vec<u8> {
     #[inline]
     fn as_buf_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
@@ -95,7 +104,7 @@ impl IoBufMut for Vec<u8> {
     }
 }
 
-impl IoBuf for String {
+unsafe impl IoBuf for String {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.as_ptr()
@@ -112,19 +121,7 @@ impl IoBuf for String {
     }
 }
 
-impl IoBufMut for String {
-    #[inline]
-    fn as_buf_mut_ptr(&mut self) -> *mut u8 {
-        unsafe { self.as_mut_vec().as_mut_ptr() }
-    }
-
-    #[inline]
-    unsafe fn set_buf_init(&mut self, len: usize) {
-        self.as_mut_vec().set_len(len);
-    }
-}
-
-impl IoBuf for &'static [u8] {
+unsafe impl IoBuf for &'static [u8] {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.as_ptr()
@@ -141,7 +138,7 @@ impl IoBuf for &'static [u8] {
     }
 }
 
-impl IoBuf for &'static str {
+unsafe impl IoBuf for &'static str {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.as_bytes().as_ptr()
@@ -158,7 +155,7 @@ impl IoBuf for &'static str {
     }
 }
 
-impl<const N: usize> IoBuf for [u8; N] {
+unsafe impl<const N: usize> IoBuf for [u8; N] {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.as_ptr()
@@ -175,7 +172,7 @@ impl<const N: usize> IoBuf for [u8; N] {
     }
 }
 
-impl<const N: usize> IoBufMut for [u8; N] {
+unsafe impl<const N: usize> IoBufMut for [u8; N] {
     #[inline]
     fn as_buf_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
@@ -184,7 +181,7 @@ impl<const N: usize> IoBufMut for [u8; N] {
     unsafe fn set_buf_init(&mut self, _len: usize) {}
 }
 
-impl IoBuf for Box<[u8]> {
+unsafe impl IoBuf for Box<[u8]> {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.as_ptr()
@@ -201,7 +198,7 @@ impl IoBuf for Box<[u8]> {
     }
 }
 
-impl IoBufMut for Box<[u8]> {
+unsafe impl IoBufMut for Box<[u8]> {
     #[inline]
     fn as_buf_mut_ptr(&mut self) -> *mut u8 {
         self.as_mut_ptr()
@@ -226,6 +223,10 @@ impl<I: IoBuf> IoBufWithCursor<I> {
     /// Advance the cursor by `n` bytes.
     #[inline]
     pub(crate) fn advance(&mut self, n: usize) {
+        assert!(
+            n <= self.buf_len(),
+            "cannot advance an I/O buffer cursor past the initialized data"
+        );
         self.cursor += n;
     }
 
@@ -236,7 +237,7 @@ impl<I: IoBuf> IoBufWithCursor<I> {
     }
 }
 
-impl<I: IoBuf> IoBuf for IoBufWithCursor<I> {
+unsafe impl<I: IoBuf> IoBuf for IoBufWithCursor<I> {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         unsafe { self.buf.as_buf_ptr().add(self.cursor) }
@@ -253,7 +254,7 @@ impl<I: IoBuf> IoBuf for IoBufWithCursor<I> {
     }
 }
 
-impl<I: IoBufMut> IoBufMut for IoBufWithCursor<I> {
+unsafe impl<I: IoBufMut> IoBufMut for IoBufWithCursor<I> {
     #[inline]
     fn as_buf_mut_ptr(&mut self) -> *mut u8 {
         unsafe { self.buf.as_buf_mut_ptr().add(self.cursor) }
@@ -278,7 +279,7 @@ impl IoBufTemporaryPoll {
     }
 }
 
-impl IoBuf for IoBufTemporaryPoll {
+unsafe impl IoBuf for IoBufTemporaryPoll {
     #[inline]
     fn as_buf_ptr(&self) -> *const u8 {
         self.ptr as *const u8
@@ -295,7 +296,7 @@ impl IoBuf for IoBufTemporaryPoll {
     }
 }
 
-impl IoBufMut for IoBufTemporaryPoll {
+unsafe impl IoBufMut for IoBufTemporaryPoll {
     #[inline]
     fn as_buf_mut_ptr(&mut self) -> *mut u8 {
         self.ptr
@@ -316,7 +317,11 @@ pub struct IoVec {
 }
 
 /// Trait for vectored read buffers.
-pub trait IoVectoredBuf: 'static {
+/// # Safety
+///
+/// Every returned vector must describe memory that remains valid and stable
+/// for reads for as long as the I/O operation owns this value.
+pub unsafe trait IoVectoredBuf: 'static {
     /// Returns a pointer to an array of `iovec` structures and its length.
     #[inline]
     fn as_iovecs(&self) -> Box<[IoVec]> {
@@ -331,7 +336,11 @@ pub trait IoVectoredBuf: 'static {
 }
 
 /// Trait for vectored write buffers.
-pub trait IoVectoredBufMut: IoVectoredBuf {
+/// # Safety
+///
+/// Every returned vector must describe memory that remains valid and stable
+/// for writes for as long as the I/O operation owns this value.
+pub unsafe trait IoVectoredBufMut: IoVectoredBuf {
     /// Returns a mutable pointer to an array of `iovec` structures and its length.
     #[inline]
     fn as_iovecs_mut(&mut self) -> Box<[IoVec]> {
@@ -340,7 +349,7 @@ pub trait IoVectoredBufMut: IoVectoredBuf {
 }
 
 #[cfg(unix)]
-impl IoVectoredBuf for Vec<libc::iovec> {
+unsafe impl IoVectoredBuf for Vec<libc::iovec> {
     #[inline]
     fn as_iovecs(&self) -> Box<[IoVec]> {
         let mut iovecs = Box::new_uninit_slice(self.len());
@@ -361,7 +370,7 @@ impl IoVectoredBuf for Vec<libc::iovec> {
 }
 
 #[cfg(unix)]
-impl IoVectoredBufMut for Vec<libc::iovec> {
+unsafe impl IoVectoredBufMut for Vec<libc::iovec> {
     #[inline]
     fn as_iovecs_mut(&mut self) -> Box<[IoVec]> {
         self.as_iovecs()
@@ -369,7 +378,7 @@ impl IoVectoredBufMut for Vec<libc::iovec> {
 }
 
 #[cfg(unix)]
-impl IoVectoredBuf for Box<[libc::iovec]> {
+unsafe impl IoVectoredBuf for Box<[libc::iovec]> {
     #[inline]
     fn as_iovecs(&self) -> Box<[IoVec]> {
         let mut iovecs = Box::new_uninit_slice(self.len());
@@ -385,7 +394,7 @@ impl IoVectoredBuf for Box<[libc::iovec]> {
 }
 
 #[cfg(unix)]
-impl IoVectoredBufMut for Box<[libc::iovec]> {
+unsafe impl IoVectoredBufMut for Box<[libc::iovec]> {
     #[inline]
     fn as_iovecs_mut(&mut self) -> Box<[IoVec]> {
         self.as_iovecs()
@@ -420,7 +429,7 @@ impl IoVectoredBufTemporaryPoll {
     }
 }
 
-impl IoVectoredBuf for IoVectoredBufTemporaryPoll {
+unsafe impl IoVectoredBuf for IoVectoredBufTemporaryPoll {
     #[inline]
     fn as_iovecs(&self) -> Box<[IoVec]> {
         let mut iovecs = Box::new_uninit_slice(self.iovecs.len());
@@ -440,7 +449,7 @@ impl IoVectoredBuf for IoVectoredBufTemporaryPoll {
     }
 }
 
-impl IoVectoredBufMut for IoVectoredBufTemporaryPoll {
+unsafe impl IoVectoredBufMut for IoVectoredBufTemporaryPoll {
     #[inline]
     fn as_iovecs_mut(&mut self) -> Box<[IoVec]> {
         self.as_iovecs()

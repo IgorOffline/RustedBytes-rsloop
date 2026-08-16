@@ -121,6 +121,7 @@ pub trait Op {
 
     /// Polls the operation for readiness (automatically determined I/O).
     #[cfg(any(feature = "fs", feature = "process"))]
+    #[allow(dead_code)]
     #[inline]
     fn poll(&mut self, cx: &mut Context<'_>, driver: &AnyDriver) -> Poll<io::Result<Self::Output>> {
         if driver.supports_completion() {

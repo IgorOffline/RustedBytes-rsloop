@@ -17,6 +17,7 @@ use crate::io::IoBufMut;
 use crate::op::io_util::CompletionBuffer;
 use crate::op::Op;
 
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub struct ReadAtOp<'a, B: IoBufMut> {
     handle: &'a InnerRawHandle,
     buf: Option<CompletionBuffer<B>>,

@@ -106,12 +106,11 @@ where
                 }
                 return Poll::Ready(Ok(()));
             }
-            let buf = {
-                let slice = Buffer::new_uninit_slice(BUFFER_SIZE);
-                // SAFETY: u8 is a primitive type and has no padding, so
-                // uninitialized memory is safe to read as a `Buffer`.
-                unsafe { slice.assume_init() }
-            };
+            // `Box<[u8]>` represents initialized bytes. Turning an
+            // uninitialized allocation into one would violate the validity
+            // invariant of `u8`, even if the reader is expected to overwrite
+            // it before it is observed.
+            let buf = vec![0; BUFFER_SIZE].into_boxed_slice();
             let Some(mut inner) = this.inner.take() else {
                 return Poll::Ready(Err(std::io::Error::other(
                     "another operation is already in progress",
@@ -129,6 +128,12 @@ where
         this.inner = Some(inner);
         match read {
             Ok(n) => {
+                if n > buf_read.len() {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "reader returned more bytes than the supplied buffer can hold",
+                    )));
+                }
                 // Put buf_read into buf
                 let unfilled =
                     unsafe { &mut *(buf.unfilled_mut() as *mut [MaybeUninit<u8>] as *mut [u8]) };
@@ -184,6 +189,24 @@ where
                         crate::io::AsyncWrite::write(&mut inner, buf).await;
                     match written {
                         Ok(n) => {
+                            if n == 0 {
+                                return (
+                                    Err(std::io::Error::new(
+                                        std::io::ErrorKind::WriteZero,
+                                        "failed to write the buffered data",
+                                    )),
+                                    inner,
+                                );
+                            }
+                            if n > buf_written.len() {
+                                return (
+                                    Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "writer returned more bytes than it was given",
+                                    )),
+                                    inner,
+                                );
+                            }
                             total_written += n;
                             buf = buf_written.split_off(n);
                         }
@@ -340,6 +363,14 @@ mod tests {
         }
     }
 
+    struct ZeroWriter;
+
+    impl AsyncWrite for ZeroWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> (Result<usize, io::Error>, B) {
+            (Ok(0), buf)
+        }
+    }
+
     impl AsyncWrite for PendingIo {
         async fn write<B: IoBuf>(&mut self, buf: B) -> (Result<usize, io::Error>, B) {
             (Ok(0), buf)
@@ -419,5 +450,18 @@ mod tests {
             }
             _ => panic!("expected concurrent write to return an error"),
         }
+    }
+
+    #[test]
+    fn async_wrap_reports_write_zero() {
+        let runtime = crate::executor::Runtime::new(crate::driver::AnyDriver::new_mock());
+        runtime.block_on(async {
+            let mut wrap = AsyncWrap::new(ZeroWriter);
+            let err = wrap
+                .write(b"data")
+                .await
+                .expect_err("a zero-length write must not be retried forever");
+            assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+        });
     }
 }

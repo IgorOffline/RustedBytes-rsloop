@@ -31,6 +31,7 @@ pub enum RegistrationMode {
 pub enum CompletionIoResult {
     #[allow(dead_code)]
     Ok(i32),
+    #[allow(dead_code)]
     Retry(usize), // usize -> token
     SubmitErr(std::io::Error),
 }

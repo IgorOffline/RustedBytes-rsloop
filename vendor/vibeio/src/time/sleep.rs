@@ -103,7 +103,7 @@ impl Sleep {
         // If there was an outstanding handle, cancel it so the timer won't
         // keep the old waker alive.
         if let Some(handle) = self.handle.take() {
-            if let Some(timer_rc) = current_timer() {
+            if let Some(timer_rc) = self.timer.as_ref() {
                 timer_rc.cancel(handle);
             }
         }
@@ -124,7 +124,7 @@ impl Future for Sleep {
         if this.handle.is_none() {
             // Schedule with runtime timer.
             let timer_rc = this.timer.get_or_insert_with(|| {
-                current_timer().expect("Sleep::poll called outside of runtime")
+                current_timer().expect("Sleep::poll called without a timer-enabled runtime")
             });
 
             // The timer driver expects a task `Waker`. We clone the task waker here.
@@ -173,7 +173,7 @@ impl Future for Sleep {
                 // The timer might have woken us up early, or another waker woke the task.
                 // Re-register the waker to ensure we get woken up again.
                 if let Some(handle) = this.handle.take() {
-                    if let Some(timer_rc) = current_timer() {
+                    if let Some(timer_rc) = this.timer.as_ref() {
                         timer_rc.cancel(handle);
                         let waker = cx.waker().clone();
                         match timer_rc.submit(this.deadline, waker) {

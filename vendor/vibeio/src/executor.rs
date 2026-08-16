@@ -316,13 +316,9 @@ pub(crate) fn current_driver() -> Option<Rc<AnyDriver>> {
 pub(crate) fn current_timer() -> Option<Rc<Timer>> {
     CURRENT_RUNTIME.with(|runtime| {
         let runtime = runtime.borrow();
-        runtime.as_ref().map(|runtime_inner| {
-            runtime_inner
-                .timer
-                .as_ref()
-                .expect("timer not enabled")
-                .clone()
-        })
+        runtime
+            .as_ref()
+            .and_then(|runtime_inner| runtime_inner.timer.clone())
     })
 }
 
@@ -607,6 +603,8 @@ impl Runtime {
         blocking_pool: Option<Box<dyn BlockingThreadPool>>,
         fs_offload: bool,
     ) -> Self {
+        #[cfg(not(feature = "time"))]
+        let _ = enable_timer;
         #[cfg(not(feature = "fs"))]
         let _ = fs_offload;
 
@@ -808,8 +806,12 @@ impl Drop for Runtime {
             zombie_reaper.close();
         }
         let _runtime_guard = CurrentRuntimeGuard::enter(inner.clone());
-        drop(inner);
+        // Clear the TLS reference while `inner` still owns the runtime. If the
+        // TLS-held `Rc` were the last one, assigning `None` would drop pending
+        // task futures while the `RefCell` is mutably borrowed; I/O future
+        // destructors calling `current_driver()` would then panic.
         drop(_runtime_guard);
+        drop(inner);
     }
 }
 
@@ -831,6 +833,22 @@ mod tests {
     impl Drop for PendingUntilDropped {
         fn drop(&mut self) {
             self.0.set(true);
+        }
+    }
+
+    struct ChecksDriverOnDrop;
+
+    impl Future for ChecksDriverOnDrop {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for ChecksDriverOnDrop {
+        fn drop(&mut self) {
+            let _ = current_driver();
         }
     }
 
@@ -885,6 +903,13 @@ mod tests {
             .token_to_task
             .borrow()
             .is_empty());
+    }
+
+    #[test]
+    fn dropping_runtime_does_not_borrow_tls_reentrantly() {
+        let runtime = crate::executor::Runtime::new(AnyDriver::new_mock());
+        let _handle = runtime.spawn(ChecksDriverOnDrop);
+        drop(runtime);
     }
 
     #[test]

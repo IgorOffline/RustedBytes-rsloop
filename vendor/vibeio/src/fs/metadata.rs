@@ -1,5 +1,8 @@
 use std::io;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+
+#[cfg(all(target_os = "linux", any(target_env = "gnu", musl_v1_2_3)))]
+use std::time::{Duration, UNIX_EPOCH};
 
 /// File metadata information.
 ///
@@ -168,12 +171,44 @@ fn statx_timestamp_to_system_time(ts: &libc::statx_timestamp) -> io::Result<Syst
     let secs = ts.tv_sec;
     let nanos = ts.tv_nsec;
 
+    if nanos >= 1_000_000_000 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid nanosecond value in statx timestamp",
+        ));
+    }
+
     if secs >= 0 {
-        Ok(UNIX_EPOCH + Duration::new(secs as u64, nanos))
-    } else {
         UNIX_EPOCH
-            .checked_sub(Duration::new((-secs) as u64, nanos))
+            .checked_add(Duration::new(secs as u64, nanos))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid statx timestamp"))
+    } else {
+        // statx uses a signed seconds field plus a positive fractional
+        // component. For example, (-1, 500ms) is half a second before the
+        // epoch, not one and a half seconds before it.
+        let whole_seconds = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(secs.unsigned_abs()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid statx timestamp"))?;
+        whole_seconds
+            .checked_add(Duration::from_nanos(nanos as u64))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid statx timestamp"))
+    }
+}
+
+#[cfg(all(test, target_os = "linux", any(target_env = "gnu", musl_v1_2_3)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statx_timestamp_handles_fractional_time_before_epoch() {
+        let mut ts: libc::statx_timestamp = unsafe { std::mem::zeroed() };
+        ts.tv_sec = -1;
+        ts.tv_nsec = 500_000_000;
+        let converted = statx_timestamp_to_system_time(&ts).expect("valid timestamp");
+        assert_eq!(
+            UNIX_EPOCH.duration_since(converted).expect("before epoch"),
+            Duration::from_millis(500)
+        );
     }
 }
 
