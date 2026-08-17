@@ -197,8 +197,9 @@ impl PyStreamTransport {
         self.core.get_protocol(py)
     }
 
-    fn set_protocol(&self, protocol: Py<PyAny>) {
-        Python::attach(|py| self.core.set_protocol(py, protocol))
+    fn set_protocol(&self, py: Python<'_>, protocol: Py<PyAny>) {
+        self.core
+            .set_protocol(py, protocol)
             .expect("failed to update transport protocol");
     }
 

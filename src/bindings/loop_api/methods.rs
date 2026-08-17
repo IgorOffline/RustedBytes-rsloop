@@ -184,32 +184,28 @@ impl PyLoop {
         self.core.set_task_factory_installed(installed);
     }
 
-    fn get_task_factory(&self) -> Option<Py<PyAny>> {
-        Python::attach(|py| {
-            self.core
-                .state
-                .lock()
-                .expect("poisoned loop state")
-                .task_factory
-                .as_ref()
-                .map(|factory| factory.clone_ref(py))
-        })
+    fn get_task_factory(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.core
+            .state
+            .lock()
+            .expect("poisoned loop state")
+            .task_factory
+            .as_ref()
+            .map(|factory| factory.clone_ref(py))
     }
 
     fn default_exception_handler(&self, py: Python<'_>, context: Py<PyAny>) -> PyResult<()> {
         self.core.default_exception_handler(py, context)
     }
 
-    fn get_exception_handler(&self) -> Option<Py<PyAny>> {
-        Python::attach(|py| {
-            self.core
-                .state
-                .lock()
-                .expect("poisoned loop state")
-                .exception_handler
-                .as_ref()
-                .map(|handler| handler.clone_ref(py))
-        })
+    fn get_exception_handler(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.core
+            .state
+            .lock()
+            .expect("poisoned loop state")
+            .exception_handler
+            .as_ref()
+            .map(|handler| handler.clone_ref(py))
     }
 
     fn set_exception_handler(&self, handler: Option<Py<PyAny>>) {

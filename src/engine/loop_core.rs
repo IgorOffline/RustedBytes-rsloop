@@ -102,31 +102,6 @@ impl WaitForWake {
     }
 }
 
-/// Releases the GIL for the lifetime of the guard, re-acquiring it on drop
-/// (including on unwind). This is the raw-FFI equivalent of
-/// `Py_BEGIN_ALLOW_THREADS`/`Py_END_ALLOW_THREADS`. We use it instead of
-/// `Python::detach` because that requires the closure to be `Ungil` (which is
-/// `Send` on this build), and vibeio's runtime and timer futures are `!Send`.
-/// Safe here because the GIL is released and re-acquired on the same thread and
-/// no `Python`/`Py` token is moved across the boundary.
-struct GilSuspend(*mut pyo3::ffi::PyThreadState);
-
-impl GilSuspend {
-    #[inline]
-    fn new() -> Self {
-        // SAFETY: called while the GIL is held; detaches this thread's state.
-        Self(unsafe { pyo3::ffi::PyEval_SaveThread() })
-    }
-}
-
-impl Drop for GilSuspend {
-    #[inline]
-    fn drop(&mut self) {
-        // SAFETY: re-attaches the thread state saved in `new` on the same thread.
-        unsafe { pyo3::ffi::PyEval_RestoreThread(self.0) };
-    }
-}
-
 /// Bounded busy-wait before parking in `block_on`. Cross-thread wakeups (reader
 /// worker threads, the transitional runtime thread) otherwise pay the full
 /// `driver.wait` park + interrupt round-trip, which dominates request/response
@@ -683,8 +658,10 @@ impl LoopCore {
             // consecutive catches, to avoid starving this loop's own runtime
             // tasks) park by driving the runtime: its `driver.wait` runs here on
             // the loop thread and is interrupted by a cross-thread wake.
-            {
-                let _gil = GilSuspend::new();
+            // Keep the `!Send` runtime lookup and future construction inside
+            // the closure so the closure itself satisfies PyO3's `Ungil`
+            // bound without bypassing PyO3's attachment bookkeeping.
+            py.detach(|| {
                 let mut caught = false;
                 if !spin_window.is_zero() {
                     let spin_deadline = Instant::now() + spin_window;
@@ -715,8 +692,7 @@ impl LoopCore {
                         runtime.block_on(wait);
                     });
                 }
-            }
-            let _ = py;
+            });
         };
 
         self.set_ready_drain_active(false);
