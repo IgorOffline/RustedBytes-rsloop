@@ -404,29 +404,36 @@ uv run --with uvloop python benches/workload_matrix.py \
   --repeat 5
 ```
 
-Representative output from the same macOS arm64 / CPython 3.14 release build
-on August 17, 2026 is below. Throughput is traffic-only operations per second,
-except for `bulk_transfer`, which reports traffic MiB/s.
+Representative output from the same macOS arm64 (Apple M2) / CPython 3.14
+release build on August 18, 2026 is below, as the per-scenario median of five
+runs of that command on an otherwise quiet machine. Throughput is traffic-only
+operations per second, except for `bulk_transfer`, which reports traffic MiB/s.
 
 | Scenario | rsloop | uvloop | rsloop difference | rsloop p95 | uvloop p95 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| HTTP keep-alive | 85,392 | 73,348 | +16.4% | 0.275 ms | 0.253 ms |
-| TLS HTTP | 49,669 | 37,281 | +33.2% | 0.426 ms | 0.505 ms |
-| Raw WebSocket | 6,103 | 6,365 | -4.1% | 4.508 ms | 3.315 ms |
-| Raw WebSocket over TLS | 5,768 | 5,831 | -1.1% | 3.115 ms | 3.484 ms |
-| `websockets` | 38,555 | 40,172 | -4.0% | 0.476 ms | 0.471 ms |
-| `websockets` over TLS | 37,939 | 25,510 | +48.7% | 0.527 ms | 0.777 ms |
-| aiohttp WebSocket | 47,899 | 49,592 | -3.4% | 0.448 ms | 0.436 ms |
-| aiohttp WebSocket over TLS | 47,017 | 30,246 | +55.5% | 0.471 ms | 0.629 ms |
-| Starlette WebSocket | 30,296 | 24,027 | +26.1% | 0.623 ms | 0.824 ms |
-| Starlette WebSocket over TLS | 31,624 | 21,968 | +44.0% | 0.590 ms | 0.878 ms |
-| Mixed streams | 79,180 | 47,011 | +68.4% | 0.267 ms | 0.449 ms |
-| Bulk transfer (MiB/s) | 4,495.8 | 2,494.1 | +80.3% | 7.000 ms | 12.784 ms |
-| Idle activation | 35,651 | 38,239 | -6.8% | 4.276 ms | 4.200 ms |
+| HTTP keep-alive | 88,616 | 68,040 | +30.2% | 0.186 ms | 0.283 ms |
+| TLS HTTP | 72,530 | 36,772 | +97.2% | 0.273 ms | 0.498 ms |
+| Raw WebSocket | 6,242 | 6,458 | -3.3% | 4.271 ms | 3.075 ms |
+| Raw WebSocket over TLS | 6,026 | 6,054 | -0.5% | 2.951 ms | 3.403 ms |
+| `websockets` | 40,232 | 40,210 | +0.1% | 0.494 ms | 0.452 ms |
+| `websockets` over TLS | 41,436 | 26,895 | +54.1% | 0.445 ms | 0.693 ms |
+| aiohttp WebSocket | 51,484 | 51,128 | +0.7% | 0.397 ms | 0.367 ms |
+| aiohttp WebSocket over TLS | 53,765 | 32,035 | +67.8% | 0.357 ms | 0.568 ms |
+| Starlette WebSocket | 29,711 | 20,412 | +45.6% | 0.700 ms | 1.059 ms |
+| Starlette WebSocket over TLS | 34,421 | 21,290 | +61.7% | 0.539 ms | 0.856 ms |
+| Mixed streams | 79,411 | 48,551 | +63.6% | 0.253 ms | 0.456 ms |
+| Bulk transfer (MiB/s) | 4,993.6 | 2,823.6 | +76.9% | 6.347 ms | 11.291 ms |
+| Idle activation | 21,189 | 21,275 | -0.4% | 7.843 ms | 7.835 ms |
+
+Read the idle-activation row as a tie rather than a measurement: its traffic
+phase is roughly ten milliseconds, and it swung by more than 2x per loop across
+those five runs. Every other row held within a few percent.
 
 These ordinary matrix defaults are intentionally short enough for local smoke
 and CI runs. Use `--sustained` and compare repeated runs before drawing
-performance conclusions for a deployment.
+performance conclusions for a deployment — competing desktop load matters more
+than it looks, because rsloop trades helper-thread CPU for loop-thread work and
+so has more to lose when cores are contended.
 
 See [`benches/README.md`](./benches/README.md) for workload details and
 extra flags, and [`examples/README.md`](./examples/README.md) for the FastAPI
