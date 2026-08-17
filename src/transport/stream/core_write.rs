@@ -29,6 +29,7 @@ use super::tuning::{
 };
 #[cfg(unix)]
 use super::unix_stream_from_owned_socket_fd;
+use super::writer::is_transient_write_backpressure;
 use super::{
     PendingReadEvent, StreamTransportCore, TransportSpawnContext, WriterCommand,
     stop_socket_reader, tcp_stream_from_owned_socket_fd,
@@ -206,10 +207,8 @@ impl StreamTransportCore {
                 self.queue_recorded_write(data);
             }
             Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) =>
+                if err.kind() == io::ErrorKind::Interrupted
+                    || is_transient_write_backpressure(&err) =>
             {
                 self.set_write_backpressure_active(true);
                 self.queue_recorded_write(data);
@@ -259,10 +258,8 @@ impl StreamTransportCore {
                     return self.queue_write(pending);
                 }
                 Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
+                    if err.kind() == io::ErrorKind::Interrupted
+                        || is_transient_write_backpressure(&err) =>
                 {
                     self.set_write_backpressure_active(true);
                     return self.queue_write(OwnedWriteBuffer::from_pooled_slice(
@@ -317,10 +314,8 @@ impl StreamTransportCore {
                     return self.queue_write(data);
                 }
                 Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
+                    if err.kind() == io::ErrorKind::Interrupted
+                        || is_transient_write_backpressure(&err) =>
                 {
                     self.set_write_backpressure_active(true);
                     return self.queue_write(data);

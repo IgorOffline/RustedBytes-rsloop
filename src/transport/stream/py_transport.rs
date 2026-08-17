@@ -106,7 +106,7 @@ impl PyStreamTransport {
             let _ = self.core.writer_tx.send(WriterCommand::Close);
             return Ok(());
         }
-        if !self.core.write_backpressure_active() {
+        if self.core.writer_is_still_lazy() {
             if let Some(writer) = &self.core.direct_writer {
                 let writer = writer.lock().expect("poisoned direct tasked writer");
                 if let Some(writer) = writer.as_ref() {
@@ -163,7 +163,7 @@ impl PyStreamTransport {
         }
         self.core.flush_pending_direct_write();
         self.core.mark_write_eof();
-        if self.core.direct_writer.is_some() && !self.core.write_backpressure_active() {
+        if self.core.direct_writer.is_some() && self.core.writer_is_still_lazy() {
             if let Some(writer) = &self.core.direct_writer {
                 let writer = writer.lock().expect("poisoned direct tasked writer");
                 match writer.as_ref() {

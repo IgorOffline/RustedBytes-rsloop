@@ -157,14 +157,14 @@ impl StreamTransportCore {
     }
 
     pub fn connection_lost(self: &Arc<Self>, exc: Option<PyErr>) -> PyResult<()> {
-        if !self.loop_core.on_runtime_thread() {
-            self.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(
-                exc.map(|err| Python::attach(|py| err.value(py).to_string())),
-            ));
-            return Ok(());
-        }
-
-        self.call_in_loop_context(|py| self.connection_lost_with_py(py, exc))
+        // Always serialize loss with pending read data, even when the caller
+        // is already on the loop thread. A direct callback here can overtake
+        // data that a reader worker has queued but the loop has not drained
+        // yet, exposing EOF before those bytes to StreamReader.
+        self.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(
+            exc.map(|err| Python::attach(|py| err.value(py).to_string())),
+        ));
+        Ok(())
     }
 
     pub(super) fn report_connection_lost_result(&self, result: PyResult<()>) {

@@ -37,7 +37,8 @@ use super::tuning::{
 };
 use super::worker::WorkerThread;
 use super::{
-    PendingReadEvent, ServerCore, StreamTransportCore, WriterCommand, spawn_writer_worker,
+    PendingReadEvent, READ_EVENT_EOF, READ_EVENT_LOST, READ_EVENT_OPEN, ServerCore,
+    StreamTransportCore, WriterCommand, spawn_writer_worker,
 };
 use crate::context::ensure_running_loop;
 use crate::engine::{LoopCommand, LoopTransportCommand};
@@ -159,6 +160,17 @@ impl StreamTransportCore {
         }
     }
 
+    /// Whether a socket can still close directly without bypassing a writer
+    /// worker. Once the lazy target has been taken, all close/EOF commands
+    /// must follow queued data through that worker; `writer_registered` is a
+    /// transient fast-path hint and can race an enqueue.
+    pub(super) fn writer_is_still_lazy(&self) -> bool {
+        self.lazy_writer
+            .lock()
+            .expect("poisoned lazy writer")
+            .is_some()
+    }
+
     #[inline]
     pub(super) fn server_ref(&self) -> Option<Weak<ServerCore>> {
         self.state
@@ -192,6 +204,43 @@ impl StreamTransportCore {
             }
             return;
         }
+
+        // Reader data and connection-loss notifications can originate on
+        // different workers. Serialize the terminal-state transition with the
+        // queue insertion so whichever event takes the lock first defines the
+        // observable order. Without this gate, a loss could be delivered and
+        // a racing data event appended behind it, causing `feed_data` after
+        // `feed_eof` on the next drain.
+        let mut queue = self
+            .pending_read_events
+            .lock()
+            .expect("poisoned pending read queue");
+        let read_event_state = self.read_event_state.load(Ordering::Acquire);
+        let reject = match &event {
+            PendingReadEvent::Data(_) | PendingReadEvent::Eof => {
+                read_event_state != READ_EVENT_OPEN
+            }
+            PendingReadEvent::ConnectionLost(_) => read_event_state == READ_EVENT_LOST,
+            PendingReadEvent::PauseWriting | PendingReadEvent::ResumeWriting => {
+                read_event_state == READ_EVENT_LOST
+            }
+        };
+        if reject {
+            drop(queue);
+            if let PendingReadEvent::Data(data) = event {
+                self.read_buffer_pool.release(data);
+            }
+            return;
+        }
+        match &event {
+            PendingReadEvent::Eof => self
+                .read_event_state
+                .store(READ_EVENT_EOF, Ordering::Release),
+            PendingReadEvent::ConnectionLost(_) => self
+                .read_event_state
+                .store(READ_EVENT_LOST, Ordering::Release),
+            _ => {}
+        }
         let data_len = match &event {
             PendingReadEvent::Data(data) => data.len(),
             _ => 0,
@@ -204,10 +253,8 @@ impl StreamTransportCore {
             self.pending_read_bytes
                 .fetch_add(data_len, Ordering::AcqRel);
         }
-        self.pending_read_events
-            .lock()
-            .expect("poisoned pending read queue")
-            .push_back(event);
+        queue.push_back(event);
+        drop(queue);
         if data_len > 0 {
             self.apply_pending_read_backpressure();
         }
@@ -352,10 +399,11 @@ impl StreamTransportCore {
                             return Ok(());
                         }
                         match self.eof_received_with_py(py) {
-                            Ok(true) => {
-                                self.read_events_scheduled.store(false, Ordering::Release);
-                                return Ok(());
-                            }
+                            // A protocol may keep the write half open after
+                            // peer EOF. Continue through already queued
+                            // pause/resume or connection-loss events; the queue
+                            // gate above prevents any later read data.
+                            Ok(true) => {}
                             Ok(false) => {
                                 self.set_closing();
                                 let _ = self.writer_tx.send(WriterCommand::Close);
@@ -697,6 +745,50 @@ mod tests {
                     .expect("pending read events")
                     .is_empty()
             );
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn terminal_read_event_rejects_late_data_without_losing_prior_data() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, _protocol) = build_test_core(py);
+
+            core.enqueue_pending_read_event(PendingReadEvent::Data(b"before".to_vec()));
+            core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(None));
+            core.enqueue_pending_read_event(PendingReadEvent::Data(b"after".to_vec()));
+
+            let queue = core
+                .pending_read_events
+                .lock()
+                .expect("pending read events");
+            assert_eq!(queue.len(), 2);
+            assert!(matches!(queue[0], PendingReadEvent::Data(ref data) if data == b"before"));
+            assert!(matches!(queue[1], PendingReadEvent::ConnectionLost(None)));
+            drop(queue);
+            assert_eq!(core.pending_read_bytes.load(Ordering::Acquire), 6);
+
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn loop_thread_connection_loss_stays_behind_queued_data() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, protocol) = build_test_core(py);
+            core.read_events_scheduled.store(true, Ordering::Release);
+            core.enqueue_pending_read_event(PendingReadEvent::Data(b"final bytes".to_vec()));
+
+            core.connection_lost(None).expect("queue connection loss");
+            assert!(protocol.borrow(py).events.is_empty());
+            core.drain_pending_read_events_with_py(py)
+                .expect("drain data and connection loss");
+
+            assert_eq!(protocol.borrow(py).received, [b"final bytes".to_vec()]);
+            assert_eq!(protocol.borrow(py).events, ["data", "lost"]);
+
             shutdown_test_core(core, writer_rx, loop_core);
         });
     }

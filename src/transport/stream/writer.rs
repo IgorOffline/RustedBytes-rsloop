@@ -337,7 +337,14 @@ pub(super) fn write_all_owned(
                 ));
             }
             Ok(written) => data.advance(written),
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+            Err(err) if is_transient_write_backpressure(&err) => {
+                // Some kernels report temporary mbuf exhaustion as ENOBUFS
+                // instead of EWOULDBLOCK on nonblocking TCP sockets. Treat it
+                // as backpressure; failing the transport here truncates data
+                // that was already accepted by asyncio's write contract.
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(1));
+                }
                 if let Some(fd) = writer.fd().filter(|_| writer.pollable()) {
                     loop {
                         match fd_ops::poll_fd(fd, false, true, BLOCKING_POLL_INTERVAL_MS) {
@@ -356,4 +363,43 @@ pub(super) fn write_all_owned(
     }
 
     Ok(())
+}
+
+#[inline]
+pub(super) fn is_transient_write_backpressure(err: &io::Error) -> bool {
+    if err.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(unix)]
+    if err.raw_os_error() == Some(libc::ENOBUFS) {
+        return true;
+    }
+    #[cfg(windows)]
+    if err.raw_os_error() == Some(10_055) {
+        // WSAENOBUFS
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod transient_write_tests {
+    use std::io;
+
+    use super::is_transient_write_backpressure;
+
+    #[test]
+    fn would_block_is_transient_write_backpressure() {
+        assert!(is_transient_write_backpressure(&io::Error::from(
+            io::ErrorKind::WouldBlock
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_buffer_space_is_transient_write_backpressure() {
+        assert!(is_transient_write_backpressure(
+            &io::Error::from_raw_os_error(libc::ENOBUFS)
+        ));
+    }
 }

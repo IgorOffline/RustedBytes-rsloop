@@ -16,6 +16,8 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use pyo3::prelude::*;
 
@@ -253,32 +255,69 @@ impl io::Write for WriterTarget {
 }
 
 pub(super) fn shutdown_tcp_stream(stream: &StdTcpStream, how: Shutdown) -> io::Result<()> {
-    match stream.shutdown(how) {
-        Ok(()) => Ok(()),
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::NotConnected | io::ErrorKind::BrokenPipe
-            ) =>
-        {
-            Ok(())
+    for attempt in 0..=100 {
+        match stream.shutdown(how) {
+            Ok(()) => return Ok(()),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotConnected | io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(err) if is_no_buffer_space(&err) && attempt < 100 => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => return Err(err),
         }
-        Err(err) => Err(err),
     }
+    unreachable!("bounded shutdown retry loop always returns")
 }
 
 #[cfg(unix)]
 pub(super) fn shutdown_unix_stream(stream: &StdUnixStream, how: Shutdown) -> io::Result<()> {
-    match stream.shutdown(how) {
-        Ok(()) => Ok(()),
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::NotConnected | io::ErrorKind::BrokenPipe
-            ) =>
-        {
-            Ok(())
+    for attempt in 0..=100 {
+        match stream.shutdown(how) {
+            Ok(()) => return Ok(()),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotConnected | io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(err) if is_no_buffer_space(&err) && attempt < 100 => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => return Err(err),
         }
-        Err(err) => Err(err),
+    }
+    unreachable!("bounded shutdown retry loop always returns")
+}
+
+#[inline]
+fn is_no_buffer_space(err: &io::Error) -> bool {
+    #[cfg(unix)]
+    if err.raw_os_error() == Some(libc::ENOBUFS) {
+        return true;
+    }
+    #[cfg(windows)]
+    if err.raw_os_error() == Some(10_055) {
+        // WSAENOBUFS
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    #[cfg(unix)]
+    #[test]
+    fn no_buffer_space_is_retryable_during_shutdown() {
+        assert!(super::is_no_buffer_space(
+            &std::io::Error::from_raw_os_error(libc::ENOBUFS)
+        ));
     }
 }

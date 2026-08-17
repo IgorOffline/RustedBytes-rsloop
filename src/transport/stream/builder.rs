@@ -17,7 +17,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::TcpStream as StdTcpStream;
 use std::os::raw::c_int;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use pyo3::exceptions::PyRuntimeError;
@@ -30,7 +30,7 @@ use super::io_targets::{LazyWriterConfig, TaskedDirectWriter};
 use super::protocol::{ProtocolCallbacks, StreamReaderFastPath};
 use super::write_queue::WriterSender;
 use super::{
-    PyStreamTransport, ServerCore, StreamTransportCore, StreamTransportState,
+    PyStreamTransport, READ_EVENT_OPEN, ServerCore, StreamTransportCore, StreamTransportState,
     StreamWriteBufferState, TransportSpawnContext,
 };
 use crate::async_event::AsyncEvent;
@@ -151,6 +151,7 @@ pub(super) fn new_stream_transport_core(
         read_buffer_pool: Arc::new(ReadBufferPool::new()),
         pending_read_bytes: AtomicUsize::new(0),
         read_events_scheduled: AtomicBool::new(false),
+        read_event_state: AtomicU8::new(READ_EVENT_OPEN),
         reading: AtomicBool::new(reading),
         detached: AtomicBool::new(false),
         writer_tx,

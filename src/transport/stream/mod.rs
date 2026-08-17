@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use pyo3::prelude::*;
@@ -120,6 +120,10 @@ enum PendingReadEvent {
     ResumeWriting,
 }
 
+const READ_EVENT_OPEN: u8 = 0;
+const READ_EVENT_EOF: u8 = 1;
+const READ_EVENT_LOST: u8 = 2;
+
 struct StreamTransportState {
     io_fd: Option<fd_ops::RawFd>,
     runtime_socket_io: bool,
@@ -173,6 +177,7 @@ pub struct StreamTransportCore {
     read_buffer_pool: Arc<ReadBufferPool>,
     pending_read_bytes: AtomicUsize,
     read_events_scheduled: AtomicBool,
+    read_event_state: AtomicU8,
     reading: AtomicBool,
     detached: AtomicBool,
     writer_tx: write_queue::WriterSender,
