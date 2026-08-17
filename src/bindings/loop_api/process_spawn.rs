@@ -6,6 +6,12 @@
 //! `umask=-1` meaning "leave unchanged" and `preexec_fn` being rejected rather
 //! than emulated). The Unix-only keywords are collected into
 //! [`UnixPreExecConfig`] and applied between fork and exec by [`super::pre_exec`].
+//!
+//! Every keyword `Popen` accepts has to be accepted here at its default value,
+//! even the ones rsloop cannot act on: callers wrap this API and forward the
+//! whole set unconditionally, so rejecting a defaulted keyword breaks them for
+//! no gain. Unrecognised keywords are still an error, which is what catches a
+//! typo or a genuinely unsupported option.
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -252,6 +258,83 @@ fn apply_process_basic_kw(
     }
 }
 
+/// `Popen` keywords that are platform-specific or already implied by the way
+/// rsloop spawns. Wrappers around `loop.subprocess_exec()` — `AnyIO` is the one
+/// that caught this — forward every one of them unconditionally at its
+/// documented default, so accepting the default has to be a no-op. A
+/// non-default value gets the same error `Popen` raises, or an explicit refusal
+/// where rsloop cannot honour it, rather than being silently dropped.
+fn apply_platform_process_kw(
+    command: &mut Command,
+    key: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    match key {
+        // rsloop inherits only the redirected stdio plus whatever `pass_fds`
+        // names, which is what close_fds=True asks for. `std`'s Command has no
+        // way to ask for the opposite.
+        "close_fds" => {
+            if !value.is_none() && !value.is_truthy()? {
+                return Err(PyValueError::new_err(
+                    "close_fds=False is not supported: rsloop relies on close-on-exec, \
+                     so name the descriptors the child needs in pass_fds instead",
+                ));
+            }
+        }
+        // A pipe capacity hint, and only that. CPython drops it too on any
+        // platform without F_SETPIPE_SZ (macOS included), so accepting and
+        // ignoring it keeps working callers working instead of failing them on
+        // a performance knob.
+        "pipesize" => {}
+        "startupinfo" => {
+            if !value.is_none() {
+                return Err(windows_only_process_kw_error("startupinfo"));
+            }
+        }
+        "creationflags" => {
+            let flags = if value.is_none() {
+                0
+            } else {
+                value.extract::<i64>()?
+            };
+            if flags != 0 {
+                apply_process_creation_flags(command, flags)?;
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn windows_only_process_kw_error(key: &str) -> PyErr {
+    PyNotImplementedError::new_err(format!(
+        "{key} is accepted only at its default value: rsloop cannot forward it to CreateProcess yet"
+    ))
+}
+
+#[cfg(not(windows))]
+fn windows_only_process_kw_error(key: &str) -> PyErr {
+    // Same wording as subprocess.Popen so callers recognise it.
+    PyValueError::new_err(format!("{key} is only supported on Windows platforms"))
+}
+
+#[cfg(windows)]
+fn apply_process_creation_flags(command: &mut Command, flags: i64) -> PyResult<()> {
+    let flags = u32::try_from(flags).map_err(|_| {
+        PyValueError::new_err("creationflags must fit in an unsigned 32-bit integer")
+    })?;
+    // `std` ORs this with the flags it needs itself, so passing the caller's
+    // value straight through is safe.
+    command.creation_flags(flags);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_process_creation_flags(_command: &mut Command, _flags: i64) -> PyResult<()> {
+    Err(windows_only_process_kw_error("creationflags"))
+}
+
 fn process_fspath(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
     py.import("os")?
         .getattr("fspath")?
@@ -423,6 +506,9 @@ fn apply_common_process_kwargs(
         if apply_process_basic_kw(py, command, &key, &value)? {
             continue;
         }
+        if apply_platform_process_kw(command, &key, &value)? {
+            continue;
+        }
         if !apply_unix_process_kw(py, &mut spawn_config.unix, &key, &value)? {
             return Err(PyTypeError::new_err(format!(
                 "unsupported subprocess keyword: {key}"
@@ -542,6 +628,95 @@ mod tests {
                 .expect("unknown keyword should not be silently ignored");
             assert!(err.is_instance_of::<PyTypeError>(py));
             assert!(err.to_string().contains("definitely_unknown"));
+        });
+    }
+
+    /// Regression test for #68: `AnyIO` forwards the whole `Popen` keyword set to
+    /// `loop.subprocess_exec()`, so each keyword has to be accepted at the
+    /// default value a caller gets when it says nothing.
+    #[test]
+    fn defaulted_popen_keywords_are_all_accepted() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("close_fds", true).expect("close_fds");
+            kwargs.set_item("restore_signals", true).expect("restore");
+            kwargs
+                .set_item("start_new_session", false)
+                .expect("session");
+            for (key, value) in [("creationflags", 0i64), ("pipesize", -1), ("umask", -1)] {
+                kwargs.set_item(key, value).expect("keyword");
+            }
+            for key in [
+                "cwd",
+                "env",
+                "executable",
+                "extra_groups",
+                "group",
+                "preexec_fn",
+                "process_group",
+                "startupinfo",
+                "user",
+            ] {
+                kwargs.set_item(key, py.None()).expect("keyword");
+            }
+            kwargs
+                .set_item("pass_fds", PyTuple::empty(py))
+                .expect("pass_fds keyword");
+
+            apply_common_process_kwargs(py, &mut Command::new("program"), Some(&kwargs))
+                .expect("defaulted Popen keywords must be accepted");
+        });
+    }
+
+    #[test]
+    fn windows_only_keywords_are_refused_when_set() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            for key in ["startupinfo", "creationflags"] {
+                let kwargs = PyDict::new(py);
+                if key == "creationflags" {
+                    kwargs.set_item(key, 8i64).expect("creationflags");
+                } else {
+                    // Any non-None object stands in for a STARTUPINFO here.
+                    kwargs.set_item(key, PyDict::new(py)).expect("startupinfo");
+                }
+                let result =
+                    apply_common_process_kwargs(py, &mut Command::new("program"), Some(&kwargs));
+
+                #[cfg(windows)]
+                if key == "creationflags" {
+                    // std can forward creation flags to CreateProcess.
+                    result.expect("creationflags applies on Windows");
+                    continue;
+                }
+
+                let err = result.err().expect("a set Windows-only keyword must fail");
+                #[cfg(windows)]
+                assert!(err.is_instance_of::<PyNotImplementedError>(py));
+                #[cfg(not(windows))]
+                {
+                    assert!(err.is_instance_of::<PyValueError>(py));
+                    assert!(
+                        err.to_string()
+                            .contains("only supported on Windows platforms")
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn close_fds_false_is_refused_rather_than_ignored() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("close_fds", false).expect("close_fds");
+            let err = apply_common_process_kwargs(py, &mut Command::new("program"), Some(&kwargs))
+                .err()
+                .expect("close_fds=False cannot be honoured");
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains("pass_fds"));
         });
     }
 

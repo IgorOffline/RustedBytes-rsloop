@@ -567,6 +567,78 @@ else:
             },
         )
 
+    def test_subprocess_exec_accepts_defaulted_popen_keywords(self) -> None:
+        """Regression test for issue #68.
+
+        Wrappers around ``loop.subprocess_exec()`` — AnyIO is the one that
+        caught this — forward the whole ``subprocess.Popen`` keyword set
+        unconditionally, so each keyword has to be accepted at the default value
+        a caller gets when it says nothing.
+        """
+        defaults: dict[str, object] = {
+            "close_fds": True,
+            "creationflags": 0,
+            "cwd": None,
+            "env": None,
+            "executable": None,
+            "pipesize": -1,
+            "restore_signals": True,
+            "start_new_session": False,
+            "startupinfo": None,
+        }
+        if os.name != "nt":
+            defaults |= {
+                "extra_groups": None,
+                "group": None,
+                "pass_fds": (),
+                "preexec_fn": None,
+                "process_group": None,
+                "umask": -1,
+                "user": None,
+            }
+
+        async def main() -> int:
+            loop = asyncio.get_running_loop()
+            transport, _ = await loop.subprocess_exec(
+                asyncio.SubprocessProtocol,
+                sys.executable,
+                "-c",
+                "pass",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **defaults,
+            )
+            try:
+                for _ in range(300):
+                    if transport.get_returncode() is not None:
+                        break
+                    await asyncio.sleep(0.01)
+                return transport.get_returncode()
+            finally:
+                transport.close()
+
+        self.assertEqual(rsloop.run(main()), 0)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only platform validation")
+    def test_subprocess_exec_rejects_windows_only_keywords_on_posix(self) -> None:
+        for keyword, value in (("startupinfo", object()), ("creationflags", 8)):
+            with self.subTest(keyword=keyword):
+
+                async def main(keyword: str = keyword, value: object = value) -> None:
+                    loop = asyncio.get_running_loop()
+                    await loop.subprocess_exec(
+                        asyncio.SubprocessProtocol,
+                        sys.executable,
+                        "-c",
+                        "pass",
+                        **{keyword: value},
+                    )
+
+                with self.assertRaises(ValueError) as caught:
+                    rsloop.run(main())
+                self.assertIn("only supported on Windows platforms", str(caught.exception))
+
     def test_subprocess_shell_round_trip(self) -> None:
         async def main() -> dict[str, object]:
             result: dict[str, object] | None = None
