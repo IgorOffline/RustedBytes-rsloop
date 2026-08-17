@@ -82,7 +82,7 @@ impl StreamTransportCore {
     pub(super) fn flush_pending_data_with_py(
         &self,
         py: Python<'_>,
-        pending_data: &mut Option<PendingReadBuffer>,
+        pending_data: &mut Option<PendingReadBuffer<'_>>,
         fast_path: Option<&StreamReaderFastPath>,
     ) -> PyResult<()> {
         profiling::scope!("StreamTransportCore::flush_pending_data_with_py");
@@ -90,15 +90,13 @@ impl StreamTransportCore {
             return Ok(());
         };
 
-        let result = if self.is_closing_or_lost() {
+        if self.is_closing_or_lost() {
             Ok(())
         } else if let Some(fast_path) = fast_path {
             fast_path.feed_data(py, data.as_slice())
         } else {
             self.data_received_slow_path(py, data.as_slice())
-        };
-        self.read_buffer_pool.release(data.0);
-        result
+        }
     }
 
     pub(super) fn report_error_with_py(

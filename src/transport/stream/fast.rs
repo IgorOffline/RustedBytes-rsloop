@@ -60,7 +60,8 @@ fn loop_create_future(py: Python<'_>, loop_obj: &Py<PyAny>) -> PyResult<Py<PyAny
 struct ReadBuffer {
     bytes: Vec<u8>,
     start: usize,
-    retained_capacity: usize,
+    baseline_capacity: usize,
+    max_retained_capacity: usize,
 }
 
 impl ReadBuffer {
@@ -68,7 +69,8 @@ impl ReadBuffer {
         Self {
             bytes: Vec::with_capacity(capacity),
             start: 0,
-            retained_capacity: capacity,
+            baseline_capacity: capacity,
+            max_retained_capacity: super::tuning::MAX_STREAM_READ_BUFFER_SIZE,
         }
     }
 
@@ -96,6 +98,7 @@ impl ReadBuffer {
         self.bytes.extend_from_slice(data);
     }
 
+    #[cfg(test)]
     fn extend_owned(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {
         if data.is_empty() {
             return Some(data);
@@ -132,8 +135,8 @@ impl ReadBuffer {
             return;
         }
         if self.start == self.bytes.len() {
-            if self.bytes.capacity() > self.retained_capacity.saturating_mul(4) {
-                self.bytes = Vec::with_capacity(self.retained_capacity);
+            if self.bytes.capacity() > self.max_retained_capacity {
+                self.bytes = Vec::with_capacity(self.baseline_capacity);
             } else {
                 self.bytes.clear();
             }
@@ -626,20 +629,6 @@ impl PyFastStreamReader {
         self.buffer.extend(data);
         self.maybe_complete_waiter(py)?;
         self.maybe_pause_transport(py)
-    }
-
-    pub(crate) fn feed_owned_data_internal(
-        &mut self,
-        py: Python<'_>,
-        data: Vec<u8>,
-    ) -> PyResult<Option<Vec<u8>>> {
-        if self.eof {
-            return Err(PyValueError::new_err("feed_data after feed_eof"));
-        }
-        let recycled = self.buffer.extend_owned(data);
-        self.maybe_complete_waiter(py)?;
-        self.maybe_pause_transport(py)?;
-        Ok(recycled)
     }
 
     #[inline]

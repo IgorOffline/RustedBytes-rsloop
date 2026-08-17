@@ -163,20 +163,6 @@ impl StreamReaderFastPath {
         }
     }
 
-    pub(super) fn feed_owned_data(
-        &self,
-        py: Python<'_>,
-        data: Vec<u8>,
-    ) -> PyResult<Option<Vec<u8>>> {
-        match self {
-            Self::Native { reader, .. } => reader.borrow_mut(py).feed_owned_data_internal(py, data),
-            Self::Generic { .. } => {
-                self.feed_data(py, &data)?;
-                Ok(Some(data))
-            }
-        }
-    }
-
     pub(super) fn feed_eof(&self, py: Python<'_>) -> PyResult<()> {
         match self {
             Self::Native { reader, .. } => reader.borrow_mut(py).feed_eof_internal(py),

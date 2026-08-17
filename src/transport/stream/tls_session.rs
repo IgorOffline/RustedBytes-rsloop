@@ -208,15 +208,24 @@ pub(super) fn continue_tls_handshake_read(
 pub(super) fn drain_tls_plaintext_locked(
     core: &Arc<StreamTransportCore>,
     state: &mut TlsIoState,
-    plaintext: &mut [u8],
+    plaintext: &mut Vec<u8>,
 ) -> Result<bool, String> {
     let mut saw_data = false;
     loop {
+        plaintext.resize(plaintext.capacity(), 0);
         match state.connection.reader_read(plaintext) {
             Ok(0) => break,
             Ok(n) => {
                 saw_data = true;
-                core.enqueue_pending_read_event(PendingReadEvent::Data(plaintext[..n].to_vec()));
+                plaintext.truncate(n);
+                let data = std::mem::take(plaintext);
+                core.enqueue_pending_read_event(PendingReadEvent::Data(data));
+                let Some(next) =
+                    core.acquire_read_buffer_blocking(super::tuning::STREAM_READ_BUFFER_SIZE, None)
+                else {
+                    return Ok(saw_data);
+                };
+                *plaintext = next;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => return Err(err.to_string()),
@@ -228,7 +237,7 @@ pub(super) fn drain_tls_plaintext_locked(
 pub(super) fn drain_buffered_tls_plaintext(
     core: &Arc<StreamTransportCore>,
     tls_state: &SharedTlsIoState,
-    plaintext: &mut [u8],
+    plaintext: &mut Vec<u8>,
 ) -> TlsReadOutcome {
     let mut state = tls_state.lock().expect("poisoned tls state");
     match drain_tls_plaintext_locked(core, &mut state, plaintext) {
@@ -241,7 +250,7 @@ pub(super) fn drain_buffered_tls_plaintext(
 pub(super) fn read_tls_records(
     core: &Arc<StreamTransportCore>,
     tls_state: &SharedTlsIoState,
-    plaintext: &mut [u8],
+    plaintext: &mut Vec<u8>,
 ) -> TlsReadOutcome {
     let mut state = tls_state.lock().expect("poisoned tls state");
     match state.read_tls() {

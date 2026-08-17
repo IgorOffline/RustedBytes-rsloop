@@ -1,6 +1,6 @@
 //! The blocking reader worker and the control path around it.
 //!
-//! `run_stream_reader` is a plain thread reading into a stack buffer and
+//! `run_stream_reader` is a plain thread reading into a pooled buffer and
 //! enqueueing events on the core. After a successful read it spins on
 //! non-blocking reads for `reader_spin_window()` before falling back to
 //! `poll()`, which removes the sleep/wake pair from a request/response
@@ -64,7 +64,11 @@ pub(super) fn run_stream_reader(
     stop: Arc<AtomicBool>,
 ) {
     profiling::scope!("stream.run_stream_reader");
-    let mut buf = [0_u8; STREAM_READ_BUFFER_SIZE];
+    let Some(mut buf) =
+        core.acquire_read_buffer_blocking(STREAM_READ_BUFFER_SIZE, Some(stop.as_ref()))
+    else {
+        return;
+    };
     let spin_window = reader_spin_window();
 
     loop {
@@ -95,13 +99,21 @@ pub(super) fn run_stream_reader(
             }
         }
 
+        buf.resize(buf.capacity(), 0);
         match reader.read(&mut buf) {
             Ok(0) => {
                 core.enqueue_pending_read_event(PendingReadEvent::Eof);
                 return;
             }
             Ok(n) => {
-                core.enqueue_pending_read_event(PendingReadEvent::Data(buf[..n].to_vec()));
+                buf.truncate(n);
+                core.enqueue_pending_read_event(PendingReadEvent::Data(buf));
+                let Some(next) =
+                    core.acquire_read_buffer_blocking(STREAM_READ_BUFFER_SIZE, Some(stop.as_ref()))
+                else {
+                    return;
+                };
+                buf = next;
                 if !spin_window.is_zero()
                     && !spin_read_stream(&core, &mut reader, &stop, &mut buf, spin_window)
                 {
@@ -127,7 +139,7 @@ pub(super) fn spin_read_stream(
     core: &Arc<StreamTransportCore>,
     reader: &mut ReaderTarget,
     stop: &Arc<AtomicBool>,
-    buf: &mut [u8],
+    buf: &mut Vec<u8>,
     spin_window: Duration,
 ) -> bool {
     let mut deadline = std::time::Instant::now() + spin_window;
@@ -139,13 +151,22 @@ pub(super) fn spin_read_stream(
             return true;
         }
 
+        buf.resize(buf.capacity(), 0);
         match reader.read(buf) {
             Ok(0) => {
                 core.enqueue_pending_read_event(PendingReadEvent::Eof);
                 return false;
             }
             Ok(n) => {
-                core.enqueue_pending_read_event(PendingReadEvent::Data(buf[..n].to_vec()));
+                buf.truncate(n);
+                let data = std::mem::take(buf);
+                core.enqueue_pending_read_event(PendingReadEvent::Data(data));
+                let Some(next) =
+                    core.acquire_read_buffer_blocking(STREAM_READ_BUFFER_SIZE, Some(stop.as_ref()))
+                else {
+                    return false;
+                };
+                *buf = next;
                 if core.is_closing() || !core.is_reading() {
                     return true;
                 }
@@ -240,7 +261,11 @@ pub(super) fn run_tls_reader(
     stop: Arc<AtomicBool>,
 ) {
     profiling::scope!("stream.run_tls_reader");
-    let mut plaintext = [0_u8; STREAM_READ_BUFFER_SIZE];
+    let Some(mut plaintext) =
+        core.acquire_read_buffer_blocking(STREAM_READ_BUFFER_SIZE, Some(stop.as_ref()))
+    else {
+        return;
+    };
 
     loop {
         if stop.load(Ordering::Acquire) {

@@ -13,7 +13,6 @@
 use std::io::{self, Write as _};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -26,13 +25,14 @@ use super::tls_session::{
 };
 use super::tuning::{BLOCKING_POLL_INTERVAL_MS, TLS_WORKER_STACK_SIZE};
 use super::worker::WorkerThread;
+use super::write_queue::{TryRecvError, WriterReceiver};
 use super::{StreamTransportCore, WriterCommand};
 use crate::fd_ops;
 
 pub(super) fn spawn_writer_worker(
     core: Arc<StreamTransportCore>,
     writer: WriterTarget,
-    writer_rx: Receiver<WriterCommand>,
+    writer_rx: WriterReceiver,
 ) -> io::Result<()> {
     profiling::scope!("stream.spawn_writer_worker");
     let thread_core = Arc::clone(&core);
@@ -46,7 +46,7 @@ pub(super) fn spawn_writer_worker(
 pub(super) fn spawn_tls_writer_worker(
     core: Arc<StreamTransportCore>,
     tls_state: SharedTlsIoState,
-    writer_rx: Receiver<WriterCommand>,
+    writer_rx: WriterReceiver,
 ) -> io::Result<()> {
     let thread_core = Arc::clone(&core);
     let worker = WorkerThread::spawn_with_stack(
@@ -61,7 +61,7 @@ pub(super) fn spawn_tls_writer_worker(
 pub(super) fn run_stream_writer(
     core: Arc<StreamTransportCore>,
     mut writer: WriterTarget,
-    writer_rx: Receiver<WriterCommand>,
+    writer_rx: WriterReceiver,
     stop: Arc<AtomicBool>,
 ) {
     profiling::scope!("stream.run_stream_writer");
@@ -75,7 +75,7 @@ pub(super) fn run_stream_writer(
             Some(command) => command,
             None => match writer_rx.recv() {
                 Ok(command) => command,
-                Err(_) => break,
+                Err(()) => break,
             },
         };
 
@@ -97,7 +97,7 @@ pub(super) fn run_stream_writer(
 pub(super) fn handle_stream_writer_command(
     core: &Arc<StreamTransportCore>,
     writer: &mut WriterTarget,
-    writer_rx: &Receiver<WriterCommand>,
+    writer_rx: &WriterReceiver,
     command: WriterCommand,
     pending_command: &mut Option<WriterCommand>,
 ) -> bool {
@@ -117,7 +117,7 @@ pub(super) fn handle_stream_writer_command(
 pub(super) fn write_stream_data_batch(
     core: &Arc<StreamTransportCore>,
     writer: &mut WriterTarget,
-    writer_rx: &Receiver<WriterCommand>,
+    writer_rx: &WriterReceiver,
     mut data: OwnedWriteBuffer,
     pending_command: &mut Option<WriterCommand>,
 ) -> bool {
@@ -201,7 +201,7 @@ pub(super) fn report_writer_close_result(core: &Arc<StreamTransportCore>, result
 pub(super) fn run_tls_writer(
     core: Arc<StreamTransportCore>,
     tls_state: SharedTlsIoState,
-    writer_rx: Receiver<WriterCommand>,
+    writer_rx: WriterReceiver,
     stop: Arc<AtomicBool>,
 ) {
     profiling::scope!("stream.run_tls_writer");
@@ -215,7 +215,7 @@ pub(super) fn run_tls_writer(
             Some(command) => command,
             None => match writer_rx.recv() {
                 Ok(command) => command,
-                Err(_) => break,
+                Err(()) => break,
             },
         };
 
@@ -231,7 +231,7 @@ pub(super) fn run_tls_writer(
 pub(super) fn handle_tls_writer_command(
     core: &Arc<StreamTransportCore>,
     tls_state: &SharedTlsIoState,
-    writer_rx: &Receiver<WriterCommand>,
+    writer_rx: &WriterReceiver,
     command: WriterCommand,
     pending_command: &mut Option<WriterCommand>,
 ) -> bool {
@@ -255,7 +255,7 @@ pub(super) fn handle_tls_writer_command(
 pub(super) fn write_tls_data_batch(
     core: &Arc<StreamTransportCore>,
     tls_state: &SharedTlsIoState,
-    writer_rx: &Receiver<WriterCommand>,
+    writer_rx: &WriterReceiver,
     data: OwnedWriteBuffer,
     pending_command: &mut Option<WriterCommand>,
 ) -> bool {

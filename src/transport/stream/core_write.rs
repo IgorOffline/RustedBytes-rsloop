@@ -10,7 +10,6 @@
 //! `pause_writing`/`resume_writing` on the protocol.
 
 use std::io::{self, Write as _};
-use std::ops::DerefMut;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -109,7 +108,7 @@ impl StreamTransportCore {
         self.pending_direct_write
             .lock()
             .expect("poisoned pending direct write")
-            .clear();
+            .take();
         self.direct_write_scheduled.store(false, Ordering::Release);
         self.clear_write_buffer(false);
         let _ = self.writer_tx.send(WriterCommand::Stop);
@@ -145,10 +144,13 @@ impl StreamTransportCore {
         }
 
         let should_pause = self.record_write_buffer_enqueued(data.len())?;
-        self.pending_direct_write
+        let mut pending = self
+            .pending_direct_write
             .lock()
-            .expect("poisoned pending direct write")
-            .extend_from_slice(data);
+            .expect("poisoned pending direct write");
+        let buffer = pending.get_or_insert_with(|| self.new_pooled_write_buffer(data.len()));
+        buffer.extend_from_slice(data);
+        drop(pending);
         if should_pause {
             self.notify_pause_writing();
         }
@@ -174,30 +176,28 @@ impl StreamTransportCore {
             return;
         }
         self.direct_write_scheduled.store(false, Ordering::Release);
-        let data = std::mem::take(
-            self.pending_direct_write
-                .lock()
-                .expect("poisoned pending direct write")
-                .deref_mut(),
-        );
-        if data.is_empty() {
+        let Some(mut data) = self
+            .pending_direct_write
+            .lock()
+            .expect("poisoned pending direct write")
+            .take()
+        else {
             return;
-        }
+        };
         if self.is_closing() {
             self.record_write_buffer_drained(data.len());
             return;
         }
 
-        match self.try_direct_tasked_write(&data) {
+        match self.try_direct_tasked_write(data.remaining()) {
             Ok(written) if written == data.len() => {
                 self.record_write_buffer_drained(written);
             }
             Ok(written) => {
                 self.record_write_buffer_drained(written);
-                let mut pending = OwnedWriteBuffer::from_vec(data);
-                pending.advance(written);
+                data.advance(written);
                 self.set_write_backpressure_active(true);
-                self.queue_recorded_write(pending);
+                self.queue_recorded_write(data);
             }
             Err(err)
                 if matches!(
@@ -206,7 +206,7 @@ impl StreamTransportCore {
                 ) =>
             {
                 self.set_write_backpressure_active(true);
-                self.queue_recorded_write(OwnedWriteBuffer::from_vec(data));
+                self.queue_recorded_write(data);
             }
             Err(err) => self.fail_write(Some(err)),
         }
@@ -219,9 +219,7 @@ impl StreamTransportCore {
                 .pending_direct_write
                 .lock()
                 .expect("poisoned pending direct write");
-            let len = pending.len();
-            pending.clear();
-            len
+            pending.take().map_or(0, |buffer| buffer.len())
         };
         self.record_write_buffer_drained(discarded);
     }
@@ -249,7 +247,8 @@ impl StreamTransportCore {
             match self.try_direct_tasked_write(data) {
                 Ok(written) if written == data.len() => return Ok(()),
                 Ok(written) => {
-                    let mut pending = OwnedWriteBuffer::from_slice(data);
+                    let mut pending =
+                        OwnedWriteBuffer::from_pooled_slice(data, &self.write_buffer_pool);
                     pending.advance(written);
                     self.set_write_backpressure_active(true);
                     return self.queue_write(pending);
@@ -261,7 +260,10 @@ impl StreamTransportCore {
                     ) =>
                 {
                     self.set_write_backpressure_active(true);
-                    return self.queue_write(OwnedWriteBuffer::from_slice(data));
+                    return self.queue_write(OwnedWriteBuffer::from_pooled_slice(
+                        data,
+                        &self.write_buffer_pool,
+                    ));
                 }
                 Err(err) => {
                     self.fail_write(Some(err));
@@ -270,7 +272,63 @@ impl StreamTransportCore {
             }
         }
 
-        self.queue_write(OwnedWriteBuffer::from_slice(data))
+        self.queue_write(OwnedWriteBuffer::from_pooled_slice(
+            data,
+            &self.write_buffer_pool,
+        ))
+    }
+
+    pub(super) fn new_pooled_write_buffer(&self, capacity: usize) -> OwnedWriteBuffer {
+        OwnedWriteBuffer::with_pooled_capacity(capacity, &self.write_buffer_pool)
+    }
+
+    pub(super) fn try_write_buffer(self: &Arc<Self>, mut data: OwnedWriteBuffer) -> io::Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        #[cfg(windows)]
+        if data.remaining().len() >= SERVER_POLL_READER_WRITE_THRESHOLD {
+            if self.server_side {
+                self.request_poll_reader();
+            }
+            if self.poll_reader_requested() && !self.poll_reader_ready.load(Ordering::Acquire) {
+                return self.stage_direct_write(data.remaining());
+            }
+        }
+
+        if self.direct_writer.is_some() && !self.write_backpressure_active() {
+            if self.direct_write_scheduled.load(Ordering::Acquire)
+                || (self.coalesce_small_server_writes
+                    && data.remaining().len() > SMALL_WRITE_COALESCE_MIN_BYTES
+                    && data.remaining().len() <= SMALL_WRITE_COALESCE_MAX_BYTES)
+            {
+                return self.stage_direct_write(data.remaining());
+            }
+            match self.try_direct_tasked_write(data.remaining()) {
+                Ok(written) if written == data.remaining().len() => return Ok(()),
+                Ok(written) => {
+                    data.advance(written);
+                    self.set_write_backpressure_active(true);
+                    return self.queue_write(data);
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    self.set_write_backpressure_active(true);
+                    return self.queue_write(data);
+                }
+                Err(err) => {
+                    self.fail_write(Some(err));
+                    return Ok(());
+                }
+            }
+        }
+
+        self.queue_write(data)
     }
 
     pub async fn wait_readable(self: &Arc<Self>) -> io::Result<()> {

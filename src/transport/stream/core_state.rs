@@ -78,6 +78,7 @@ impl StreamTransportCore {
         self.state.lock().expect("poisoned transport state").closing = true;
         self.state_cv.notify_all();
         self.read_state_notify.notify_all();
+        self.read_buffer_pool.close();
     }
 
     pub(super) fn runtime_socket_fd(&self) -> Option<fd_ops::RawFd> {
@@ -100,6 +101,7 @@ impl StreamTransportCore {
         self.reading.store(false, Ordering::Release);
         self.state_cv.notify_all();
         self.read_state_notify.notify_all();
+        self.read_buffer_pool.close();
     }
 
     pub(super) fn release_direct_writer(&self) {
@@ -178,6 +180,35 @@ impl StreamTransportCore {
                 return;
             }
             let _ = wait.await;
+        }
+    }
+
+    pub(super) fn acquire_read_buffer_blocking(
+        &self,
+        capacity: usize,
+        stop: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Option<Vec<u8>> {
+        loop {
+            if self.is_closing() || stop.is_some_and(|stop| stop.load(Ordering::Acquire)) {
+                return None;
+            }
+            if let Some(buffer) = self.read_buffer_pool.try_acquire(capacity) {
+                return Some(buffer);
+            }
+            self.read_buffer_pool
+                .wait_timeout(Duration::from_millis(50));
+        }
+    }
+
+    pub(super) async fn acquire_read_buffer_async(&self, capacity: usize) -> Option<Vec<u8>> {
+        loop {
+            if self.is_closing() {
+                return None;
+            }
+            if let Some(buffer) = self.read_buffer_pool.try_acquire(capacity) {
+                return Some(buffer);
+            }
+            self.read_buffer_pool.wait_async().await;
         }
     }
 

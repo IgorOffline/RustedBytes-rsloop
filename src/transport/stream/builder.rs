@@ -18,7 +18,6 @@ use std::io;
 use std::net::TcpStream as StdTcpStream;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use pyo3::exceptions::PyRuntimeError;
@@ -26,12 +25,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_async_runtimes::TaskLocals;
 
-use super::buffers::ReadBufferPool;
+use super::buffers::{ReadBufferPool, WriteBufferPool};
 use super::io_targets::{LazyWriterConfig, TaskedDirectWriter};
 use super::protocol::{ProtocolCallbacks, StreamReaderFastPath};
+use super::write_queue::WriterSender;
 use super::{
     PyStreamTransport, ServerCore, StreamTransportCore, StreamTransportState,
-    StreamWriteBufferState, TransportSpawnContext, WriterCommand,
+    StreamWriteBufferState, TransportSpawnContext,
 };
 use crate::async_event::AsyncEvent;
 use crate::engine::LoopCore;
@@ -125,7 +125,7 @@ pub(super) fn stream_transport_state_parts(
 
 pub(super) fn new_stream_transport_core(
     parts: StreamTransportBuildParts,
-    writer_tx: Sender<WriterCommand>,
+    writer_tx: WriterSender,
     direct_writer: Option<TaskedDirectWriter>,
     lazy_writer: Option<LazyWriterConfig>,
 ) -> Arc<StreamTransportCore> {
@@ -141,15 +141,22 @@ pub(super) fn new_stream_transport_core(
         loop_core: parts.loop_core,
         loop_obj: parts.loop_obj,
         state: Mutex::new(parts.state),
-        pending_read_events: Mutex::new(VecDeque::new()),
+        pending_read_events: Mutex::new(VecDeque::with_capacity(
+            super::tuning::READ_BUFFER_POOL_LIMIT + 4,
+        )),
+        read_event_drain: Mutex::new(VecDeque::with_capacity(
+            super::tuning::READ_BUFFER_POOL_LIMIT + 4,
+        )),
+        read_coalesce_buffer: Mutex::new(Vec::new()),
         read_buffer_pool: Arc::new(ReadBufferPool::new()),
         pending_read_bytes: AtomicUsize::new(0),
         read_events_scheduled: AtomicBool::new(false),
         reading: AtomicBool::new(reading),
         detached: AtomicBool::new(false),
         writer_tx,
+        write_buffer_pool: Arc::new(WriteBufferPool::new()),
         direct_writer: direct_writer.map(|writer| Mutex::new(Some(writer))),
-        pending_direct_write: Mutex::new(Vec::new()),
+        pending_direct_write: Mutex::new(None),
         direct_write_scheduled: AtomicBool::new(false),
         #[cfg(windows)]
         poll_reader_requested: AtomicBool::new(false),

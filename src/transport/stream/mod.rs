@@ -21,7 +21,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use pyo3::prelude::*;
@@ -59,13 +58,14 @@ mod tls_session;
 mod tls_transport;
 mod tuning;
 mod worker;
+mod write_queue;
 mod writer;
 
 #[cfg(unix)]
 use accept::run_unix_accept_loop;
 use accept::{BlockingAcceptLoop, run_tcp_accept_loop};
 pub(crate) use accept::{run_server_accept_task, spawn_accepted_transport_with_py};
-use buffers::{OwnedWriteBuffer, ReadBufferPool};
+use buffers::{OwnedWriteBuffer, ReadBufferPool, WriteBufferPool};
 use builder::make_stream_extra;
 pub use builder::task_locals_for_loop;
 #[cfg(unix)]
@@ -168,14 +168,17 @@ pub struct StreamTransportCore {
     loop_obj: Py<PyAny>,
     state: Mutex<StreamTransportState>,
     pending_read_events: Mutex<VecDeque<PendingReadEvent>>,
+    read_event_drain: Mutex<VecDeque<PendingReadEvent>>,
+    read_coalesce_buffer: Mutex<Vec<u8>>,
     read_buffer_pool: Arc<ReadBufferPool>,
     pending_read_bytes: AtomicUsize,
     read_events_scheduled: AtomicBool,
     reading: AtomicBool,
     detached: AtomicBool,
-    writer_tx: Sender<WriterCommand>,
+    writer_tx: write_queue::WriterSender,
+    write_buffer_pool: Arc<WriteBufferPool>,
     direct_writer: Option<Mutex<Option<TaskedDirectWriter>>>,
-    pending_direct_write: Mutex<Vec<u8>>,
+    pending_direct_write: Mutex<Option<OwnedWriteBuffer>>,
     direct_write_scheduled: AtomicBool,
     #[cfg(windows)]
     poll_reader_requested: AtomicBool,
@@ -254,7 +257,6 @@ pub struct PyStreamTransport {
 pub(super) mod test_support {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::mpsc::{self, Receiver};
 
     use pyo3::exceptions::PyRuntimeError;
     use pyo3::prelude::*;
@@ -264,7 +266,8 @@ pub(super) mod test_support {
         StreamTransportStateConfig, new_stream_transport_core, stream_transport_state_parts,
     };
     use super::protocol::build_protocol_callbacks;
-    use super::{StreamTransportCore, TransportSpawnContext, WriterCommand};
+    use super::write_queue::{WriterReceiver, channel as writer_channel};
+    use super::{StreamTransportCore, TransportSpawnContext};
     use crate::engine::LoopCore;
 
     #[pyclass]
@@ -358,7 +361,7 @@ pub(super) mod test_support {
         py: Python<'_>,
     ) -> (
         Arc<StreamTransportCore>,
-        Receiver<WriterCommand>,
+        WriterReceiver,
         Arc<LoopCore>,
         Py<RecordingProtocol>,
     ) {
@@ -388,7 +391,7 @@ pub(super) mod test_support {
                 server: None,
             },
         );
-        let (writer_tx, writer_rx) = mpsc::channel();
+        let (writer_tx, writer_rx) = writer_channel();
         let core = new_stream_transport_core(parts, writer_tx, None, None);
         loop_core.mark_runtime_thread();
         (core, writer_rx, loop_core, protocol)
@@ -396,7 +399,7 @@ pub(super) mod test_support {
 
     pub(super) fn shutdown_test_core(
         core: Arc<StreamTransportCore>,
-        writer_rx: Receiver<WriterCommand>,
+        writer_rx: WriterReceiver,
         loop_core: Arc<LoopCore>,
     ) {
         loop_core.clear_runtime_thread();

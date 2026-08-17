@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -25,9 +24,10 @@ use super::platform::from_owned_raw_fd;
 #[cfg(windows)]
 use super::platform::from_owned_raw_handle;
 use super::protocol::build_protocol_callbacks;
+use super::write_queue::{WriterReceiver, channel as writer_channel};
 use super::{
-    PyStreamTransport, StreamTransportCore, TransportSpawnContext, WriterCommand,
-    spawn_reader_worker, spawn_writer_worker,
+    PyStreamTransport, StreamTransportCore, TransportSpawnContext, spawn_reader_worker,
+    spawn_writer_worker,
 };
 use crate::fd_ops;
 
@@ -98,10 +98,10 @@ pub(super) fn pipe_transport_core(
 ) -> PyResult<(
     Arc<StreamTransportCore>,
     Py<PyStreamTransport>,
-    Receiver<WriterCommand>,
+    WriterReceiver,
 )> {
     let callbacks = build_protocol_callbacks(py, &spawn_context.protocol)?;
-    let (writer_tx, writer_rx) = mpsc::channel();
+    let (writer_tx, writer_rx) = writer_channel();
     let reading = mode.reading();
     let writable = mode.writable();
     let parts = stream_transport_state_parts(

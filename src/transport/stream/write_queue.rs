@@ -1,0 +1,208 @@
+//! Allocation-stable command queue for a transport writer worker.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
+
+use super::WriterCommand;
+
+const INITIAL_WRITER_QUEUE_CAPACITY: usize = 8;
+
+struct QueueState {
+    commands: VecDeque<WriterCommand>,
+    sender_alive: bool,
+    receiver_alive: bool,
+}
+
+struct SharedQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+pub(super) struct WriterSender {
+    shared: Arc<SharedQueue>,
+}
+
+pub(super) struct WriterReceiver {
+    shared: Arc<SharedQueue>,
+}
+
+pub(super) enum TryRecvError {
+    Empty,
+    Disconnected,
+}
+
+pub(super) fn channel() -> (WriterSender, WriterReceiver) {
+    let shared = Arc::new(SharedQueue {
+        state: Mutex::new(QueueState {
+            commands: VecDeque::with_capacity(INITIAL_WRITER_QUEUE_CAPACITY),
+            sender_alive: true,
+            receiver_alive: true,
+        }),
+        ready: Condvar::new(),
+    });
+    (
+        WriterSender {
+            shared: Arc::clone(&shared),
+        },
+        WriterReceiver { shared },
+    )
+}
+
+impl WriterSender {
+    pub(super) fn send(&self, command: WriterCommand) -> Result<(), WriterCommand> {
+        let mut state = self.shared.state.lock().expect("poisoned writer queue");
+        if !state.receiver_alive {
+            return Err(command);
+        }
+        if let WriterCommand::Data(data) = &command
+            && let Some(WriterCommand::Data(pending)) = state.commands.back_mut()
+            && pending.try_append(data.remaining())
+        {
+            return Ok(());
+        }
+        state.commands.push_back(command);
+        drop(state);
+        self.shared.ready.notify_one();
+        Ok(())
+    }
+}
+
+impl Drop for WriterSender {
+    fn drop(&mut self) {
+        self.shared
+            .state
+            .lock()
+            .expect("poisoned writer queue")
+            .sender_alive = false;
+        self.shared.ready.notify_all();
+    }
+}
+
+impl WriterReceiver {
+    pub(super) fn recv(&self) -> Result<WriterCommand, ()> {
+        let mut state = self.shared.state.lock().expect("poisoned writer queue");
+        loop {
+            if let Some(command) = state.commands.pop_front() {
+                return Ok(command);
+            }
+            if !state.sender_alive {
+                return Err(());
+            }
+            state = self
+                .shared
+                .ready
+                .wait(state)
+                .expect("poisoned writer queue");
+        }
+    }
+
+    pub(super) fn try_recv(&self) -> Result<WriterCommand, TryRecvError> {
+        let mut state = self.shared.state.lock().expect("poisoned writer queue");
+        if let Some(command) = state.commands.pop_front() {
+            Ok(command)
+        } else if state.sender_alive {
+            Err(TryRecvError::Empty)
+        } else {
+            Err(TryRecvError::Disconnected)
+        }
+    }
+}
+
+impl Drop for WriterReceiver {
+    fn drop(&mut self) {
+        self.shared
+            .state
+            .lock()
+            .expect("poisoned writer queue")
+            .receiver_alive = false;
+        self.shared.ready.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_reuses_capacity_and_reports_disconnects() {
+        let (sender, receiver) = channel();
+        assert!(sender.send(WriterCommand::Stop).is_ok());
+        assert!(matches!(receiver.recv(), Ok(WriterCommand::Stop)));
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        drop(sender);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn queue_retains_growth_for_the_next_burst() {
+        let (sender, receiver) = channel();
+        for _ in 0..32 {
+            assert!(sender.send(WriterCommand::Stop).is_ok());
+        }
+        let grown_capacity = sender
+            .shared
+            .state
+            .lock()
+            .expect("writer queue")
+            .commands
+            .capacity();
+        for _ in 0..32 {
+            assert!(matches!(receiver.recv(), Ok(WriterCommand::Stop)));
+        }
+        for _ in 0..32 {
+            assert!(sender.send(WriterCommand::Stop).is_ok());
+        }
+
+        assert_eq!(
+            sender
+                .shared
+                .state
+                .lock()
+                .expect("writer queue")
+                .commands
+                .capacity(),
+            grown_capacity
+        );
+    }
+
+    #[test]
+    fn queue_coalesces_adjacent_data_without_crossing_control_commands() {
+        let (sender, receiver) = channel();
+        assert!(
+            sender
+                .send(WriterCommand::Data(
+                    super::super::buffers::OwnedWriteBuffer::from_slice(b"one")
+                ))
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(WriterCommand::Data(
+                    super::super::buffers::OwnedWriteBuffer::from_slice(b"two")
+                ))
+                .is_ok()
+        );
+        assert!(sender.send(WriterCommand::WriteEof).is_ok());
+        assert!(
+            sender
+                .send(WriterCommand::Data(
+                    super::super::buffers::OwnedWriteBuffer::from_slice(b"three")
+                ))
+                .is_ok()
+        );
+
+        let WriterCommand::Data(data) = receiver.recv().expect("coalesced data") else {
+            panic!("expected data");
+        };
+        assert_eq!(data.remaining(), b"onetwo");
+        assert!(matches!(receiver.recv(), Ok(WriterCommand::WriteEof)));
+        let WriterCommand::Data(data) = receiver.recv().expect("data after control") else {
+            panic!("expected data");
+        };
+        assert_eq!(data.remaining(), b"three");
+    }
+}

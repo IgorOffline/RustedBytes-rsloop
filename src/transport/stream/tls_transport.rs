@@ -14,7 +14,6 @@
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -34,6 +33,7 @@ use super::protocol::build_protocol_callbacks;
 use super::tls_session::{
     SharedTlsIoState, TlsConnectionKind, TlsIoState, complete_tls_handshake, tls_server_closed,
 };
+use super::write_queue::channel as writer_channel;
 use super::{
     PyStreamTransport, ServerCore, TransportSpawnContext, spawn_tls_reader_worker,
     spawn_tls_writer_worker,
@@ -184,7 +184,7 @@ pub(super) fn spawn_tls_transport(
     let handshake_server = server.clone();
     let callbacks = build_protocol_callbacks(py, &spawn_context.protocol)?;
     spawn_context.context_needs_run &= callbacks.stream_reader_fast_path.is_none();
-    let (writer_tx, writer_rx) = mpsc::channel();
+    let (writer_tx, writer_rx) = writer_channel();
     let stream_fd = stream.fd();
     let tls_state = tls_io_state(stream, connection, shutdown_timeout);
 

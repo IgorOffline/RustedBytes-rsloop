@@ -30,12 +30,9 @@ use vibeio::net::TcpStream as VibeTcpStream;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
 
-use super::buffers::ReadBufferPool;
 #[cfg(windows)]
 use super::tuning::SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES;
-use super::tuning::{
-    MAX_STREAM_READ_BUFFER_SIZE, OWNED_READ_HANDOFF_MIN_BYTES, STREAM_READ_BUFFER_SIZE,
-};
+use super::tuning::{MAX_STREAM_READ_BUFFER_SIZE, STREAM_READ_BUFFER_SIZE};
 use super::{PendingReadEvent, StreamTransportCore};
 
 #[cfg(not(windows))]
@@ -55,7 +52,12 @@ pub(crate) async fn run_tcp_socket_reader_task(
     };
     // `read_buf` writes into spare capacity, so idle transports reserve this
     // address space without eagerly zero-filling and faulting in every page.
-    let mut buf = Vec::with_capacity(STREAM_READ_BUFFER_SIZE);
+    let Some(mut buf) = core
+        .acquire_read_buffer_async(STREAM_READ_BUFFER_SIZE)
+        .await
+    else {
+        return;
+    };
 
     loop {
         if core.is_closing() {
@@ -76,8 +78,12 @@ pub(crate) async fn run_tcp_socket_reader_task(
                 return;
             }
             Ok(_) => {
-                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
-                core.enqueue_pending_read_event(PendingReadEvent::Data(data));
+                let next_capacity = next_read_capacity(&buf);
+                core.enqueue_pending_read_event(PendingReadEvent::Data(buf));
+                let Some(next) = core.acquire_read_buffer_async(next_capacity).await else {
+                    return;
+                };
+                buf = next;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -114,7 +120,13 @@ pub(crate) async fn run_tcp_socket_reader_task(
             return;
         }
     };
-    let mut buf = Vec::with_capacity(STREAM_READ_BUFFER_SIZE);
+    let Some(mut buf) = core
+        .acquire_read_buffer_async(STREAM_READ_BUFFER_SIZE)
+        .await
+    else {
+        core.mark_poll_reader_ready(false);
+        return;
+    };
 
     loop {
         if core.is_closing() {
@@ -156,7 +168,8 @@ pub(crate) async fn run_tcp_socket_reader_task(
             }
             Ok(read) => {
                 let saturated = read == buf.capacity();
-                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
+                let next_capacity = next_read_capacity(&buf);
+                let data = buf;
                 let tiny_server_trigger =
                     core.server_side && read <= SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES;
 
@@ -173,7 +186,11 @@ pub(crate) async fn run_tcp_socket_reader_task(
                         Ok(poll_reader) => {
                             core.mark_poll_reader_ready(true);
                             core.enqueue_pending_read_event(PendingReadEvent::Data(data));
-                            run_windows_poll_tcp_reader(core, poll_reader, buf).await;
+                            let Some(next) = core.acquire_read_buffer_async(next_capacity).await
+                            else {
+                                return;
+                            };
+                            run_windows_poll_tcp_reader(core, poll_reader, next).await;
                         }
                         Err(err) => {
                             core.mark_poll_reader_ready(false);
@@ -187,6 +204,10 @@ pub(crate) async fn run_tcp_socket_reader_task(
                 }
 
                 core.enqueue_pending_read_event(PendingReadEvent::Data(data));
+                let Some(next) = core.acquire_read_buffer_async(next_capacity).await else {
+                    return;
+                };
+                buf = next;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -243,8 +264,12 @@ pub(super) async fn run_windows_poll_tcp_reader(
                 return;
             }
             Ok(_) => {
-                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
-                core.enqueue_pending_read_event(PendingReadEvent::Data(data));
+                let next_capacity = next_read_capacity(&buf);
+                core.enqueue_pending_read_event(PendingReadEvent::Data(buf));
+                let Some(next) = core.acquire_read_buffer_async(next_capacity).await else {
+                    return;
+                };
+                buf = next;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -273,7 +298,12 @@ pub(crate) async fn run_unix_socket_reader_task(
             return;
         }
     };
-    let mut buf = Vec::with_capacity(STREAM_READ_BUFFER_SIZE);
+    let Some(mut buf) = core
+        .acquire_read_buffer_async(STREAM_READ_BUFFER_SIZE)
+        .await
+    else {
+        return;
+    };
 
     loop {
         if core.is_closing() {
@@ -292,8 +322,12 @@ pub(crate) async fn run_unix_socket_reader_task(
                 return;
             }
             Ok(_) => {
-                let data = take_async_read_data(&mut buf, &core.read_buffer_pool);
-                core.enqueue_pending_read_event(PendingReadEvent::Data(data));
+                let next_capacity = next_read_capacity(&buf);
+                core.enqueue_pending_read_event(PendingReadEvent::Data(buf));
+                let Some(next) = core.acquire_read_buffer_async(next_capacity).await else {
+                    return;
+                };
+                buf = next;
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -307,23 +341,13 @@ pub(crate) async fn run_unix_socket_reader_task(
     }
 }
 
-pub(super) fn take_async_read_data(buf: &mut Vec<u8>, pool: &ReadBufferPool) -> Vec<u8> {
+fn next_read_capacity(buf: &Vec<u8>) -> usize {
     let capacity = buf.capacity().max(STREAM_READ_BUFFER_SIZE);
-    let next_capacity = if buf.len() == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
+    if buf.len() == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
         (capacity * 2).min(MAX_STREAM_READ_BUFFER_SIZE)
     } else if capacity > STREAM_READ_BUFFER_SIZE && buf.len() < capacity / 4 {
         (capacity / 2).max(STREAM_READ_BUFFER_SIZE)
     } else {
         capacity
-    };
-
-    if buf.len() < OWNED_READ_HANDOFF_MIN_BYTES {
-        let data = buf.clone();
-        if next_capacity != capacity {
-            let previous = std::mem::replace(buf, pool.acquire(next_capacity));
-            pool.release(previous);
-        }
-        return data;
     }
-    std::mem::replace(buf, pool.acquire(next_capacity))
 }

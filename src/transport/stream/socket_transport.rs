@@ -20,7 +20,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::sync::Arc;
 use std::sync::Weak;
-use std::sync::mpsc;
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -36,6 +35,7 @@ use super::platform::{from_owned_raw_fd, unix_raw_fd};
 use super::platform::{socket_from_owned_raw, tcp_stream_raw_fd};
 use super::protocol::build_protocol_callbacks;
 use super::tls_transport::{spawn_tls_client_transport, spawn_tls_server_transport};
+use super::write_queue::channel as writer_channel;
 use super::{PyStreamTransport, ServerCore, TransportSpawnContext, spawn_socket_reader};
 use crate::fd_ops;
 use crate::transport::tls::{ClientTlsSettings, ServerTlsSettings};
@@ -206,7 +206,7 @@ pub fn spawn_tcp_transport(
     let callbacks = build_protocol_callbacks(py, &spawn_context.protocol)?;
     spawn_context.context_needs_run &= callbacks.stream_reader_fast_path.is_none();
     let stream = Arc::new(stream);
-    let (writer_tx, writer_rx) = mpsc::channel();
+    let (writer_tx, writer_rx) = writer_channel();
     let parts = stream_transport_state_parts(
         spawn_context,
         callbacks,
@@ -260,7 +260,7 @@ pub fn spawn_unix_transport(
     let callbacks = build_protocol_callbacks(py, &spawn_context.protocol)?;
     spawn_context.context_needs_run &= callbacks.stream_reader_fast_path.is_none();
     let direct_writer = duplicate_unix_direct_writer(raw_fd)?;
-    let (writer_tx, writer_rx) = mpsc::channel();
+    let (writer_tx, writer_rx) = writer_channel();
     let parts = stream_transport_state_parts(
         spawn_context,
         callbacks,

@@ -80,7 +80,7 @@ impl PyStreamTransport {
         // syscalls for framed protocols, validating and joining here lets the
         // direct path account for backpressure once for the complete batch.
         let bytes_type = py.import("builtins")?.getattr("bytes")?;
-        let mut joined = Vec::new();
+        let mut joined = self.core.new_pooled_write_buffer(0);
         for item in seq.try_iter()? {
             let item = item?;
             if let Ok(bytes) = item.cast::<PyBytes>() {
@@ -91,7 +91,7 @@ impl PyStreamTransport {
             }
         }
         self.core
-            .try_write_bytes(&joined)
+            .try_write_buffer(joined)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
         Ok(())
     }

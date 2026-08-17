@@ -187,6 +187,9 @@ impl StreamTransportCore {
         // cancelled plaintext reader may still complete once; never deliver
         // that late event to the application protocol after the handoff.
         if self.detached.load(Ordering::Acquire) {
+            if let PendingReadEvent::Data(data) = event {
+                self.read_buffer_pool.release(data);
+            }
             return;
         }
         let data_len = match &event {
@@ -245,7 +248,10 @@ impl StreamTransportCore {
         };
         let fast_path = fast_path.as_ref();
         let mut pending_data: Option<PendingReadBuffer> = None;
-        let mut drained = VecDeque::new();
+        let mut drained = self
+            .read_event_drain
+            .lock()
+            .expect("poisoned read event drain queue");
         let mut drained_events = 0;
         let mut drained_bytes = 0;
         loop {
@@ -259,7 +265,7 @@ impl StreamTransportCore {
                     return Ok(());
                 }
 
-                std::mem::swap(&mut drained, queue.deref_mut());
+                std::mem::swap(drained.deref_mut(), queue.deref_mut());
             }
 
             while let Some(event) = drained.pop_front() {
@@ -270,10 +276,10 @@ impl StreamTransportCore {
                         drained_events += 1;
                         drained_bytes += data.len();
                         if let Some(fast_path) = fast_path.as_ref() {
-                            match fast_path.feed_owned_data(py, data) {
-                                Ok(Some(buffer)) => self.read_buffer_pool.release(buffer),
-                                Ok(None) => {}
+                            match fast_path.feed_data(py, &data) {
+                                Ok(()) => self.read_buffer_pool.release(data),
                                 Err(err) => {
+                                    self.read_buffer_pool.release(data);
                                     let _ = self.report_error_with_py(
                                         py,
                                         err,
@@ -290,8 +296,8 @@ impl StreamTransportCore {
                                     if buffer.len() + data.len()
                                         <= MAX_PENDING_READ_COALESCE_BYTES =>
                                 {
-                                    let recycled = buffer.extend(data);
-                                    self.read_buffer_pool.release(recycled);
+                                    buffer.extend(&data);
+                                    self.read_buffer_pool.release(data);
                                 }
                                 Some(_) => {
                                     if let Err(err) = self.flush_pending_data_with_py(
@@ -308,9 +314,19 @@ impl StreamTransportCore {
                                         self.read_events_scheduled.store(false, Ordering::Release);
                                         return Ok(());
                                     }
-                                    pending_data = Some(PendingReadBuffer(data));
+                                    let mut buffer =
+                                        PendingReadBuffer::new(&self.read_coalesce_buffer);
+                                    buffer.extend(&data);
+                                    self.read_buffer_pool.release(data);
+                                    pending_data = Some(buffer);
                                 }
-                                None => pending_data = Some(PendingReadBuffer(data)),
+                                None => {
+                                    let mut buffer =
+                                        PendingReadBuffer::new(&self.read_coalesce_buffer);
+                                    buffer.extend(&data);
+                                    self.read_buffer_pool.release(data);
+                                    pending_data = Some(buffer);
+                                }
                             }
                         }
 

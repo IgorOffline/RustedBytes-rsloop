@@ -31,8 +31,13 @@ pub(super) const MAX_STREAM_READ_BUFFER_SIZE: usize = 64 * 1024;
 pub(super) const SERVER_POLL_READER_WRITE_THRESHOLD: usize = STREAM_READ_BUFFER_SIZE;
 #[cfg(windows)]
 pub(super) const SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES: usize = 16;
-pub(super) const OWNED_READ_HANDOFF_MIN_BYTES: usize = 1024;
-pub(super) const READ_BUFFER_POOL_LIMIT: usize = 1;
+// Keep enough buffers for one reader, one native stream buffer, and a short
+// loop-thread backlog. Buffers are allocated lazily; once all slots exist,
+// readers wait for recycling rather than allocating beyond this bound.
+pub(super) const READ_BUFFER_POOL_LIMIT: usize = 4;
+pub(super) const WRITE_BUFFER_BLOCK_SIZE: usize = 16 * 1024;
+pub(super) const WRITE_BUFFER_POOL_LIMIT: usize =
+    DEFAULT_WRITE_BUFFER_HIGH_WATER / WRITE_BUFFER_BLOCK_SIZE + 1;
 pub(super) const TLS_WORKER_STACK_SIZE: usize = 256 * 1024;
 const DEFAULT_MAX_PENDING_TLS_HANDSHAKES: usize = 256;
 

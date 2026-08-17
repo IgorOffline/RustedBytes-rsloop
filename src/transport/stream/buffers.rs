@@ -1,53 +1,122 @@
 //! Owned buffers shared by stream reader and writer paths.
 
-use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
-use super::tuning::{MAX_STREAM_READ_BUFFER_SIZE, READ_BUFFER_POOL_LIMIT};
+use futures::future::poll_fn;
+use futures::task::AtomicWaker;
+
+use super::tuning::{
+    MAX_STREAM_READ_BUFFER_SIZE, READ_BUFFER_POOL_LIMIT, WRITE_BUFFER_BLOCK_SIZE,
+    WRITE_BUFFER_POOL_LIMIT,
+};
 
 pub(super) struct OwnedWriteBuffer {
-    bytes: Box<[u8]>,
+    bytes: Vec<u8>,
     offset: usize,
+    pool: Option<Arc<WriteBufferPool>>,
 }
 
-pub(super) struct PendingReadBuffer(pub(super) Vec<u8>);
+pub(super) struct PendingReadBuffer<'a> {
+    bytes: Vec<u8>,
+    home: &'a Mutex<Vec<u8>>,
+}
 
-impl PendingReadBuffer {
+impl<'a> PendingReadBuffer<'a> {
+    pub(super) fn new(home: &'a Mutex<Vec<u8>>) -> Self {
+        let mut bytes = std::mem::take(&mut *home.lock().expect("poisoned read coalesce buffer"));
+        bytes.clear();
+        Self { bytes, home }
+    }
+
     #[inline]
     pub(super) fn len(&self) -> usize {
-        self.0.len()
+        self.bytes.len()
     }
 
     #[inline]
     pub(super) fn as_slice(&self) -> &[u8] {
-        &self.0
+        &self.bytes
     }
 
-    pub(super) fn extend(&mut self, data: Vec<u8>) -> Vec<u8> {
-        self.0.extend_from_slice(&data);
-        data
+    pub(super) fn extend(&mut self, data: &[u8]) {
+        self.bytes.extend_from_slice(data);
+    }
+}
+
+impl Drop for PendingReadBuffer<'_> {
+    fn drop(&mut self) {
+        self.bytes.clear();
+        *self.home.lock().expect("poisoned read coalesce buffer") = std::mem::take(&mut self.bytes);
     }
 }
 
 impl OwnedWriteBuffer {
     #[inline]
+    #[cfg(test)]
     pub(super) fn from_slice(data: &[u8]) -> Self {
         Self {
-            bytes: Box::<[u8]>::from(data),
+            bytes: data.to_vec(),
             offset: 0,
+            pool: None,
         }
     }
 
+    pub(super) fn from_pooled_slice(data: &[u8], pool: &Arc<WriteBufferPool>) -> Self {
+        let (mut bytes, pooled) = pool.acquire(data.len());
+        bytes.extend_from_slice(data);
+        Self {
+            bytes,
+            offset: 0,
+            pool: pooled.then(|| Arc::clone(pool)),
+        }
+    }
+
+    pub(super) fn with_pooled_capacity(capacity: usize, pool: &Arc<WriteBufferPool>) -> Self {
+        let (bytes, pooled) = pool.acquire(capacity);
+        Self {
+            bytes,
+            offset: 0,
+            pool: pooled.then(|| Arc::clone(pool)),
+        }
+    }
+
+    pub(super) fn extend_from_slice(&mut self, data: &[u8]) {
+        self.bytes.extend_from_slice(data);
+    }
+
+    pub(super) fn try_append(&mut self, data: &[u8]) -> bool {
+        if self.offset != 0
+            || data.len()
+                > super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER.saturating_sub(self.bytes.len())
+        {
+            return false;
+        }
+        self.bytes.extend_from_slice(data);
+        true
+    }
+
     #[inline]
+    #[cfg(test)]
     pub(super) fn from_vec(data: Vec<u8>) -> Self {
         Self {
-            bytes: data.into_boxed_slice(),
+            bytes: data,
             offset: 0,
+            pool: None,
         }
     }
 
     #[inline]
     pub(super) fn remaining(&self) -> &[u8] {
         &self.bytes[self.offset..]
+    }
+
+    #[inline]
+    pub(super) fn len(&self) -> usize {
+        self.remaining().len()
     }
 
     #[inline]
@@ -61,54 +130,205 @@ impl OwnedWriteBuffer {
     }
 }
 
+impl Drop for OwnedWriteBuffer {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            pool.release(std::mem::take(&mut self.bytes));
+        }
+    }
+}
+
+/// Lazily populated storage for writes that cannot complete directly.
+pub(super) struct WriteBufferPool {
+    state: Mutex<WriteBufferPoolState>,
+    #[cfg(test)]
+    allocations: AtomicUsize,
+    #[cfg(test)]
+    fallbacks: AtomicUsize,
+}
+
+struct WriteBufferPoolState {
+    buffers: Vec<Vec<u8>>,
+    allocated: usize,
+}
+
+impl WriteBufferPool {
+    pub(super) fn new() -> Self {
+        Self {
+            state: Mutex::new(WriteBufferPoolState {
+                buffers: Vec::with_capacity(WRITE_BUFFER_POOL_LIMIT),
+                allocated: 0,
+            }),
+            #[cfg(test)]
+            allocations: AtomicUsize::new(0),
+            #[cfg(test)]
+            fallbacks: AtomicUsize::new(0),
+        }
+    }
+
+    fn acquire(&self, capacity: usize) -> (Vec<u8>, bool) {
+        let mut state = self.state.lock().expect("poisoned write buffer pool");
+        let (mut buffer, pooled) = if let Some(buffer) = state.buffers.pop() {
+            (buffer, true)
+        } else if state.allocated < WRITE_BUFFER_POOL_LIMIT {
+            state.allocated += 1;
+            #[cfg(test)]
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+            (
+                Vec::with_capacity(capacity.max(WRITE_BUFFER_BLOCK_SIZE)),
+                true,
+            )
+        } else {
+            #[cfg(test)]
+            self.fallbacks.fetch_add(1, Ordering::Relaxed);
+            (Vec::with_capacity(capacity), false)
+        };
+        drop(state);
+        buffer.clear();
+        if buffer.capacity() < capacity {
+            #[cfg(test)]
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+            buffer.reserve(capacity);
+        }
+        (buffer, pooled)
+    }
+
+    pub(super) fn release(&self, mut buffer: Vec<u8>) {
+        let mut state = self.state.lock().expect("poisoned write buffer pool");
+        if buffer.capacity() > super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER {
+            state.allocated = state.allocated.saturating_sub(1);
+            return;
+        }
+        buffer.clear();
+        if state.buffers.len() < WRITE_BUFFER_POOL_LIMIT {
+            state.buffers.push(buffer);
+        } else {
+            state.allocated = state.allocated.saturating_sub(1);
+        }
+    }
+}
+
 /// Small transport-local pool shared by the runtime reader and Python-loop
 /// delivery path. Framed protocols repeatedly exchange similarly sized
 /// buffers; recycling avoids allocating a fresh Vec after every owned handoff.
 pub(super) struct ReadBufferPool {
-    buffers: Mutex<Vec<Vec<u8>>>,
+    state: Mutex<ReadBufferPoolState>,
+    available: Condvar,
+    async_available: AtomicWaker,
+    closed: AtomicBool,
+    #[cfg(test)]
+    allocations: AtomicUsize,
+}
+
+struct ReadBufferPoolState {
+    buffers: Vec<Vec<u8>>,
+    allocated: usize,
 }
 
 impl ReadBufferPool {
     pub(super) fn new() -> Self {
         Self {
-            buffers: Mutex::new(Vec::with_capacity(READ_BUFFER_POOL_LIMIT)),
+            state: Mutex::new(ReadBufferPoolState {
+                buffers: Vec::with_capacity(READ_BUFFER_POOL_LIMIT),
+                allocated: 0,
+            }),
+            available: Condvar::new(),
+            async_available: AtomicWaker::new(),
+            closed: AtomicBool::new(false),
+            #[cfg(test)]
+            allocations: AtomicUsize::new(0),
         }
     }
 
-    pub(super) fn acquire(&self, capacity: usize) -> Vec<u8> {
-        let mut buffer = self
-            .buffers
-            .lock()
-            .expect("poisoned stream read buffer pool")
-            .pop()
-            .unwrap_or_default();
+    pub(super) fn try_acquire(&self, capacity: usize) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().expect("poisoned stream read buffer pool");
+        let mut buffer = if let Some(buffer) = state.buffers.pop() {
+            buffer
+        } else if state.allocated < READ_BUFFER_POOL_LIMIT {
+            state.allocated += 1;
+            #[cfg(test)]
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+            Vec::with_capacity(capacity)
+        } else {
+            return None;
+        };
+        drop(state);
         buffer.clear();
         if buffer.capacity() < capacity {
-            buffer.reserve(capacity - buffer.capacity());
+            #[cfg(test)]
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+            buffer.reserve(capacity);
         }
-        buffer
+        Some(buffer)
+    }
+
+    fn has_available(&self) -> bool {
+        let state = self.state.lock().expect("poisoned stream read buffer pool");
+        !state.buffers.is_empty() || state.allocated < READ_BUFFER_POOL_LIMIT
+    }
+
+    pub(super) async fn wait_async(&self) {
+        poll_fn(|context| {
+            if self.closed.load(Ordering::Acquire) || self.has_available() {
+                return std::task::Poll::Ready(());
+            }
+            self.async_available.register(context.waker());
+            if self.closed.load(Ordering::Acquire) || self.has_available() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    pub(super) fn wait_timeout(&self, timeout: Duration) {
+        let state = self.state.lock().expect("poisoned stream read buffer pool");
+        if state.buffers.is_empty() && state.allocated >= READ_BUFFER_POOL_LIMIT {
+            let _ = self
+                .available
+                .wait_timeout(state, timeout)
+                .expect("poisoned stream read buffer pool");
+        }
+    }
+
+    pub(super) fn notify_all(&self) {
+        self.available.notify_all();
+        self.async_available.wake();
+    }
+
+    pub(super) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.notify_all();
     }
 
     pub(super) fn release(&self, mut buffer: Vec<u8>) {
+        let mut state = self.state.lock().expect("poisoned stream read buffer pool");
         if buffer.capacity() > MAX_STREAM_READ_BUFFER_SIZE {
+            state.allocated = state.allocated.saturating_sub(1);
+            drop(state);
+            self.notify_all();
             return;
         }
         buffer.clear();
-        let mut buffers = self
-            .buffers
-            .lock()
-            .expect("poisoned stream read buffer pool");
-        if buffers.len() < READ_BUFFER_POOL_LIMIT {
-            buffers.push(buffer);
+        if state.buffers.len() < READ_BUFFER_POOL_LIMIT {
+            state.buffers.push(buffer);
+        } else {
+            state.allocated = state.allocated.saturating_sub(1);
         }
+        drop(state);
+        self.notify_all();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+
     use super::{
         MAX_STREAM_READ_BUFFER_SIZE, OwnedWriteBuffer, PendingReadBuffer, READ_BUFFER_POOL_LIMIT,
-        ReadBufferPool,
+        ReadBufferPool, WRITE_BUFFER_POOL_LIMIT, WriteBufferPool,
     };
 
     #[test]
@@ -139,46 +359,116 @@ mod tests {
     }
 
     #[test]
-    fn pending_read_buffer_coalesces_and_returns_recyclable_input() {
-        let mut pending = PendingReadBuffer(vec![1, 2]);
+    fn pending_read_buffer_coalesces_and_returns_storage_home() {
+        let home = Mutex::new(vec![1, 2]);
+        let mut pending = PendingReadBuffer::new(&home);
         let input = vec![3, 4, 5];
 
-        let recycled = pending.extend(input);
+        pending.extend(&input);
 
-        assert_eq!(pending.len(), 5);
-        assert_eq!(pending.as_slice(), &[1, 2, 3, 4, 5]);
-        assert_eq!(recycled, vec![3, 4, 5]);
+        assert_eq!(pending.len(), 3);
+        assert_eq!(pending.as_slice(), &[3, 4, 5]);
+        drop(pending);
+        assert!(home.lock().expect("coalesce buffer").capacity() >= 3);
     }
 
     #[test]
     fn read_buffer_pool_clears_and_reuses_released_buffers() {
         let pool = ReadBufferPool::new();
-        let mut buffer = Vec::with_capacity(128);
+        let mut buffer = pool.try_acquire(128).expect("initial buffer");
         buffer.extend_from_slice(b"stale data");
         let pointer = buffer.as_ptr();
         pool.release(buffer);
 
-        let acquired = pool.acquire(64);
+        let acquired = pool.try_acquire(64).expect("recycled buffer");
 
         assert!(acquired.is_empty());
         assert_eq!(acquired.as_ptr(), pointer);
         assert!(acquired.capacity() >= 128);
+        pool.release(acquired);
+        let allocation_count = pool.allocations.load(Ordering::Relaxed);
+        let grown = pool.try_acquire(4096).expect("grown buffer");
+        pool.release(grown);
+        assert!(pool.allocations.load(Ordering::Relaxed) > allocation_count);
+        let warmed_count = pool.allocations.load(Ordering::Relaxed);
+        let warmed = pool.try_acquire(4096).expect("warmed buffer");
+        pool.release(warmed);
+        assert_eq!(pool.allocations.load(Ordering::Relaxed), warmed_count);
     }
 
     #[test]
     fn read_buffer_pool_enforces_count_and_capacity_limits() {
         let pool = ReadBufferPool::new();
-        for capacity in [32, 64] {
-            pool.release(Vec::with_capacity(capacity));
+        let mut held = Vec::new();
+        for capacity in 1..=READ_BUFFER_POOL_LIMIT {
+            held.push(pool.try_acquire(capacity * 32).expect("pool slot"));
+        }
+        for buffer in held {
+            pool.release(buffer);
         }
         assert_eq!(
-            pool.buffers.lock().expect("read buffer pool").len(),
+            pool.state.lock().expect("read buffer pool").buffers.len(),
             READ_BUFFER_POOL_LIMIT
         );
 
-        let oversized = Vec::with_capacity(MAX_STREAM_READ_BUFFER_SIZE + 1);
-        pool.acquire(0);
+        let mut oversized = pool
+            .try_acquire(MAX_STREAM_READ_BUFFER_SIZE)
+            .expect("oversized pool slot");
+        oversized.resize(MAX_STREAM_READ_BUFFER_SIZE, 0);
+        oversized.reserve(1);
         pool.release(oversized);
-        assert!(pool.buffers.lock().expect("read buffer pool").is_empty());
+        let state = pool.state.lock().expect("read buffer pool");
+        assert_eq!(state.buffers.len(), READ_BUFFER_POOL_LIMIT - 1);
+        assert_eq!(state.allocated, READ_BUFFER_POOL_LIMIT - 1);
+    }
+
+    #[test]
+    fn read_buffer_pool_stops_allocating_at_the_slot_limit() {
+        let pool = ReadBufferPool::new();
+        let held = (0..READ_BUFFER_POOL_LIMIT)
+            .map(|_| pool.try_acquire(64).expect("pool slot"))
+            .collect::<Vec<_>>();
+
+        assert!(pool.try_acquire(64).is_none());
+        pool.release(held.into_iter().next().expect("held buffer"));
+        assert!(pool.try_acquire(64).is_some());
+        assert_eq!(
+            pool.allocations.load(Ordering::Relaxed),
+            READ_BUFFER_POOL_LIMIT
+        );
+    }
+
+    #[test]
+    fn read_buffer_release_makes_a_slot_available() {
+        let pool = ReadBufferPool::new();
+        let held = (0..READ_BUFFER_POOL_LIMIT)
+            .map(|_| pool.try_acquire(64).expect("pool slot"))
+            .collect::<Vec<_>>();
+        assert!(!pool.has_available());
+
+        pool.release(held.into_iter().next().expect("held buffer"));
+
+        assert!(pool.has_available());
+    }
+
+    #[test]
+    fn write_buffer_pool_reuses_storage_and_bounds_normal_allocations() {
+        let pool = Arc::new(WriteBufferPool::new());
+        let first = OwnedWriteBuffer::from_pooled_slice(b"first", &pool);
+        let pointer = first.bytes.as_ptr();
+        drop(first);
+
+        let reused = OwnedWriteBuffer::from_pooled_slice(b"second", &pool);
+        assert_eq!(reused.bytes.as_ptr(), pointer);
+        assert_eq!(pool.allocations.load(Ordering::Relaxed), 1);
+        drop(reused);
+
+        let held = (0..WRITE_BUFFER_POOL_LIMIT)
+            .map(|_| OwnedWriteBuffer::from_pooled_slice(b"held", &pool))
+            .collect::<Vec<_>>();
+        let fallback = OwnedWriteBuffer::from_pooled_slice(b"fallback", &pool);
+        assert!(fallback.pool.is_none());
+        assert_eq!(pool.fallbacks.load(Ordering::Relaxed), 1);
+        drop(held);
     }
 }

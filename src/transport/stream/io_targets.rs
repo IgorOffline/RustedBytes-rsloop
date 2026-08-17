@@ -16,17 +16,16 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
 
 use pyo3::prelude::*;
 
-use super::WriterCommand;
 use super::duplicate_configured_tcp_stream;
 #[cfg(unix)]
 use super::duplicate_unix_direct_writer;
 #[cfg(unix)]
 use super::platform::unix_raw_fd;
 use super::platform::{file_raw_fd, tcp_stream_raw_fd};
+use super::write_queue::WriterReceiver;
 use crate::fd_ops;
 
 pub(super) enum TaskedDirectWriter {
@@ -102,7 +101,7 @@ pub(super) enum WriterTarget {
 
 pub(super) struct LazyWriterConfig {
     pub(super) target: LazyWriterTarget,
-    pub(super) writer_rx: Receiver<WriterCommand>,
+    pub(super) writer_rx: WriterReceiver,
 }
 
 pub(super) enum LazyWriterTarget {
