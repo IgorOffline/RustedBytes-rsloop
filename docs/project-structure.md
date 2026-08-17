@@ -78,7 +78,7 @@ When you are unsure whether a feature is expected to work, check the tests.
 
 ## Benchmarks
 
-Path: `benchmarks/`
+Path: `benches/`
 
 This directory contains performance comparison tools.
 

@@ -11,8 +11,8 @@ tmp/
 python/rsloop/_loop.*
 python/rsloop/rsloop.pdb
 
-benchmarks/profiles*
-benchmarks/compare_event_loops.results.json
+benches/profiles*
+benches/compare_event_loops.results.json
 
 tests/fixtures/tls
 

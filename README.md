@@ -360,14 +360,14 @@ The repository also includes:
 
 - [`examples/fastapi_service.py`](./examples/fastapi_service.py) for running the same
   FastAPI app on stdlib `asyncio`, `uvloop`, or `rsloop`
-- [`benchmarks/compare_event_loops.py`](./benchmarks/compare_event_loops.py)
+- [`benches/compare_event_loops.py`](./benches/compare_event_loops.py)
   for callback, task, and TCP stream comparisons
 
 ## Benchmark
 
 ```bash
 uv run --with maturin maturin develop --release
-uv run --with uvloop python benchmarks/compare_event_loops.py
+uv run --with uvloop python benches/compare_event_loops.py
 ```
 
 An example output from that script on macOS (arm64) with CPython 3.14:
@@ -396,7 +396,7 @@ The production-shaped workload matrix exercises HTTP, WebSocket libraries,
 TLS, mixed message sizes, backpressure, and connection lifecycle behavior:
 
 ```bash
-uv run --with uvloop python benchmarks/workload_matrix.py \
+uv run --with uvloop python benches/workload_matrix.py \
   --loops rsloop,uvloop \
   --warmups 1 \
   --repeat 5
@@ -426,7 +426,7 @@ These ordinary matrix defaults are intentionally short enough for local smoke
 and CI runs. Use `--sustained` and compare repeated runs before drawing
 performance conclusions for a deployment.
 
-See [`benchmarks/README.md`](./benchmarks/README.md) for workload details and
+See [`benches/README.md`](./benches/README.md) for workload details and
 extra flags, and [`examples/README.md`](./examples/README.md) for the FastAPI
 loop comparison example.
 

@@ -10,10 +10,10 @@ Run it from the repository root so Python resolves the editable Rust package cle
 
 ```bash
 uv run --with maturin maturin develop --release
-uv run --with uvloop python benchmarks/compare_event_loops.py
+uv run --with uvloop python benches/compare_event_loops.py
 ```
 
-Benchmark runner: [`benchmarks/compare_event_loops.py`](./compare_event_loops.py)
+Benchmark runner: [`benches/compare_event_loops.py`](./compare_event_loops.py)
 
 The Rust prototype should be installed in release mode before benchmarking.
 Using the default debug build will heavily skew the comparison against
@@ -23,7 +23,7 @@ Useful quick run:
 
 ```bash
 uv run --with maturin maturin develop --release
-uv run --with uvloop python benchmarks/compare_event_loops.py \
+uv run --with uvloop python benches/compare_event_loops.py \
   --warmups 0 \
   --repeat 3 \
   --callbacks 50000 \
@@ -37,10 +37,10 @@ measured runs, add a label directory:
 
 ```bash
 uv run --with maturin maturin develop --release --features profiler
-uv run --with uvloop python benchmarks/compare_event_loops.py \
+uv run --with uvloop python benches/compare_event_loops.py \
   --loops rsloop \
   --workloads callbacks,tasks,tcp_streams \
-  --profile-rsloop-dir benchmarks/profiles
+  --profile-rsloop-dir benches/profiles
 ```
 
 No files are written by Tracy. The directory argument is only used to derive a
@@ -66,7 +66,7 @@ By default, `tcp_streams` uses `rsloop`'s native fast streams. If you want all
 three loops to go through the stdlib `asyncio` streams layer instead, pass:
 
 ```bash
-uv run --with uvloop python benchmarks/compare_event_loops.py --no-rsloop-fast-streams
+uv run --with uvloop python benches/compare_event_loops.py --no-rsloop-fast-streams
 ```
 
 ## Representative workload matrix
@@ -100,8 +100,8 @@ Build rsloop in release mode and run the standard matrix with:
 
 ```bash
 uv run --with maturin maturin develop --release
-uv run --with uvloop python benchmarks/workload_matrix.py  # Unix
-uv run --with winloop python benchmarks/workload_matrix.py # Windows
+uv run --with uvloop python benches/workload_matrix.py  # Unix
+uv run --with winloop python benches/workload_matrix.py # Windows
 ```
 
 The default comparison is `asyncio,uvloop,rsloop` on Unix. Because uvloop is
@@ -111,7 +111,7 @@ Unavailable optional loops are reported and skipped.
 For a quick smoke run:
 
 ```bash
-uv run --with uvloop python benchmarks/workload_matrix.py \
+uv run --with uvloop python benches/workload_matrix.py \
   --warmups 0 \
   --repeat 1 \
   --concurrency 4 \
@@ -121,7 +121,7 @@ uv run --with uvloop python benchmarks/workload_matrix.py \
   --idle-seconds 0.01
 ```
 
-Use `--json-output benchmarks/results/matrix.json` to retain raw measurements.
+Use `--json-output benches/results/matrix.json` to retain raw measurements.
 Pass `--measurement-mode cold` to put every warmup and measured run in a fresh
 process when startup cost is the subject of the comparison.
 For performance conclusions, add `--sustained`. It raises short loopback
@@ -140,9 +140,9 @@ pass before each rsloop scenario:
 
 ```bash
 uv run --with maturin maturin develop --release --features profiler
-uv run --with uvloop python benchmarks/workload_matrix.py \
+uv run --with uvloop python benches/workload_matrix.py \
   --loops rsloop \
-  --profile-rsloop-dir benchmarks/profiles \
+  --profile-rsloop-dir benches/profiles \
   --allow-profiler-build
 ```
 
@@ -165,8 +165,8 @@ Save comparable before/after runs, then enforce the default budgets of 3%
 throughput, 5% p95/p99 latency, and 5% peak RSS:
 
 ```bash
-uv run python benchmarks/check_regression.py \
-  benchmarks/results/baseline.json benchmarks/results/candidate.json
+uv run python benches/check_regression.py \
+  benches/results/baseline.json benches/results/candidate.json
 ```
 
 Add `--require-improvement 10` when validating an optimization that is expected

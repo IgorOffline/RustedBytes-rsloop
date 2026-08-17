@@ -37,4 +37,4 @@ test-frameworks:
     uv run --with 'faststream[nats]' python tests/packages/faststream_test.py
 
 bench-real-world:
-    uv run --with {{benchmark-backend}} python benchmarks/workload_matrix.py
+    uv run --with {{benchmark-backend}} python benches/workload_matrix.py
