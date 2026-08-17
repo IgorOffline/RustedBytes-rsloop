@@ -26,6 +26,8 @@ The package exposes:
 Repository metadata currently targets Python `>=3.10`.
 The native runtime requires Linux 6.1+, macOS 13+, or Windows 11+ so its hot
 paths can rely on modern completion, timer, and scheduler primitives.
+Free-threaded CPython is not currently supported; the extension explicitly
+requests GIL-enabled execution while its mutable-buffer fast paths are audited.
 
 ## Documentation
 
@@ -288,7 +290,7 @@ scripts/build-wheels.sh
 ```
 
 [`scripts/build-wheels.sh`](./scripts/build-wheels.sh) currently defaults to
-CPython `3.10 3.11 3.12 3.13 3.14` plus free-threaded `3.14t`, and
+CPython `3.10 3.11 3.12 3.13 3.14`, and
 uses `uv python install` / `uv python find` to locate interpreters.
 
 ## Profiling

@@ -58,7 +58,10 @@ pub(crate) fn initialize_python_for_tests() {
     });
 }
 
-#[pymodule(gil_used = false)]
+// The transport fast paths still rely on GIL serialization around mutable
+// Python buffers and raw CPython calls. Do not advertise free-threaded safety
+// until those paths have been audited and synchronized independently.
+#[pymodule(gil_used = true)]
 fn _loop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module_init::add_module_contents(m)

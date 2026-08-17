@@ -22,7 +22,7 @@ Options:
 
 Environment:
   RSLOOP_PYTHON_VERSIONS  Space-separated version list to override the defaults
-                          (default: 3.10 3.11 3.12 3.13 3.14 3.14t)
+                          (default: 3.10 3.11 3.12 3.13 3.14)
   RSLOOP_RUST_TARGET      Rust compilation target to pass to maturin
   MACOSX_DEPLOYMENT_TARGET
                           macOS wheel floor (defaults to 13.0 for Apple targets)
@@ -33,7 +33,7 @@ Examples:
   scripts/build-wheels.sh --target aarch64-apple-darwin
   scripts/build-wheels.sh --target x86_64-pc-windows-msvc
   scripts/build-wheels.sh --target aarch64-pc-windows-msvc
-  RSLOOP_PYTHON_VERSIONS="3.12 3.13 3.14t" scripts/build-wheels.sh -- --features profiler
+  RSLOOP_PYTHON_VERSIONS="3.12 3.13 3.14" scripts/build-wheels.sh -- --features profiler
 EOF
 }
 

@@ -54,9 +54,11 @@ print(rsloop.build_info())
 ```
 
 It returns the package version, debug or release profile, target OS and
-architecture, free-threaded Python status, selected I/O reactor, TLS backend,
-and whether profiler support was compiled in. The exact values depend on the
-installed wheel or local build.
+architecture, whether the build interpreter was free-threaded, selected I/O
+reactor, TLS backend, and whether profiler support was compiled in. The
+`free_threaded` diagnostic describes the interpreter used for the build; rsloop
+currently requests GIL-enabled execution and does not support free-threaded
+operation. The exact values depend on the installed wheel or local build.
 
 ## Simplest way to use it
 

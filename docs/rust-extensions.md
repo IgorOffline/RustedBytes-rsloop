@@ -58,7 +58,7 @@ fn sleep_and_tag(py: Python<'_>, label: String, delay_ms: u64) -> PyResult<Bound
     })
 }
 
-#[pymodule(gil_used = false)]
+#[pymodule(gil_used = true)]
 fn my_rust_ext(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sleep_and_tag, m)?)?;
     Ok(())
@@ -102,7 +102,7 @@ Your extension crate should depend on:
 ```toml
 [dependencies]
 async-std = "1"
-pyo3 = { version = "0.29", features = ["extension-module"] }
+pyo3 = "0.29.2"
 rsloop = { version = "0.1.32" }
 ```
 
@@ -119,7 +119,7 @@ Your `pyproject.toml` should use `maturin` in the normal PyO3 way:
 
 ```toml
 [build-system]
-requires = ["maturin>=1.7,<2"]
+requires = ["maturin>=1.9.4,<2"]
 build-backend = "maturin"
 
 [tool.maturin]

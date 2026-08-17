@@ -2,22 +2,19 @@
 
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyTuple;
-use std::sync::OnceLock;
 
-static SET_RUNNING_LOOP_FN: OnceLock<Py<PyAny>> = OnceLock::new();
+static SET_RUNNING_LOOP_FN: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 #[inline]
 fn set_running_loop_fn(py: Python<'_>) -> PyResult<&Py<PyAny>> {
-    if let Some(cached) = SET_RUNNING_LOOP_FN.get() {
-        return Ok(cached);
-    }
-
-    let loaded = py
-        .import("asyncio.events")?
-        .getattr("_set_running_loop")?
-        .unbind();
-    Ok(SET_RUNNING_LOOP_FN.get_or_init(|| loaded))
+    SET_RUNNING_LOOP_FN.get_or_try_init(py, || {
+        Ok(py
+            .import("asyncio.events")?
+            .getattr("_set_running_loop")?
+            .unbind())
+    })
 }
 
 /// Captures the caller's context unless an explicit context was supplied.
@@ -70,10 +67,7 @@ pub fn exit_context(py: Python<'_>, context: &Py<PyAny>) -> PyResult<()> {
 
 #[inline]
 fn call_noargs(py: Python<'_>, callback: &Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // SAFETY: `callback` is a live Python callable and the GIL is held. The owned return pointer
-    // is transferred to PyO3, which converts null returns into `PyErr`.
-    unsafe { Bound::from_owned_ptr_or_err(py, ffi::compat::PyObject_CallNoArgs(callback.as_ptr())) }
-        .map(Bound::unbind)
+    Ok(callback.bind(py).call0()?.unbind())
 }
 
 #[inline]
@@ -82,17 +76,7 @@ fn call_onearg(
     callback: &Py<PyAny>,
     arg: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    // SAFETY: `callback` and `arg` are live Python objects under the GIL, and the CPython varargs
-    // list is terminated with a null pointer. PyO3 owns successful returns and maps null to `PyErr`.
-    let result = unsafe {
-        let ptr = ffi::PyObject_CallFunctionObjArgs(
-            callback.as_ptr(),
-            arg.as_ptr(),
-            std::ptr::null_mut::<ffi::PyObject>(),
-        );
-        Bound::from_owned_ptr_or_err(py, ptr)
-    };
-    result.map(Bound::unbind)
+    Ok(callback.bind(py).call1((arg,))?.unbind())
 }
 
 pub fn run_in_context(

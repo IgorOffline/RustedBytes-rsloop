@@ -34,7 +34,7 @@ fn race_sum(py: Python<'_>, values: Vec<u64>) -> PyResult<Bound<'_, PyAny>> {
     })
 }
 
-#[pymodule(gil_used = false)]
+#[pymodule(gil_used = true)]
 fn rsloop_rust_example(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sleep_and_tag, m)?)?;
     m.add_function(wrap_pyfunction!(race_sum, m)?)?;

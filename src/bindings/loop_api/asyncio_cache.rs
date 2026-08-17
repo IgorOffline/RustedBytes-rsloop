@@ -6,13 +6,10 @@
 //! `PyObject_Vectorcall` needs a `kwnames` tuple, and rebuilding it per call
 //! would allocate on every task creation.
 
-use std::sync::OnceLock;
-
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
 
-#[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-use pyo3::exceptions::PyRuntimeError;
 #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
 use pyo3::types::PyTuple;
 
@@ -21,39 +18,39 @@ use super::ffi_helpers;
 use crate::python_names;
 
 struct PythonApiCaches {
-    asyncio_task_cls: OnceLock<Py<PyAny>>,
-    asyncio_future_cls: OnceLock<Py<PyAny>>,
-    asyncio_get_running_loop_fn: OnceLock<Py<PyAny>>,
-    asyncio_task_kwarg_support: OnceLock<TaskKwargSupport>,
+    asyncio_task_cls: PyOnceLock<Py<PyAny>>,
+    asyncio_future_cls: PyOnceLock<Py<PyAny>>,
+    asyncio_get_running_loop_fn: PyOnceLock<Py<PyAny>>,
+    asyncio_task_kwarg_support: PyOnceLock<TaskKwargSupport>,
     #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-    asyncio_future_loop_kwnames: OnceLock<Py<PyTuple>>,
+    asyncio_future_loop_kwnames: PyOnceLock<Py<PyTuple>>,
     #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-    asyncio_task_loop_kwnames: OnceLock<Py<PyTuple>>,
+    asyncio_task_loop_kwnames: PyOnceLock<Py<PyTuple>>,
     #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-    asyncio_task_loop_name_kwnames: OnceLock<Py<PyTuple>>,
+    asyncio_task_loop_name_kwnames: PyOnceLock<Py<PyTuple>>,
     #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-    asyncio_task_loop_context_kwnames: OnceLock<Py<PyTuple>>,
+    asyncio_task_loop_context_kwnames: PyOnceLock<Py<PyTuple>>,
     #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-    asyncio_task_loop_name_context_kwnames: OnceLock<Py<PyTuple>>,
+    asyncio_task_loop_name_context_kwnames: PyOnceLock<Py<PyTuple>>,
 }
 
 impl PythonApiCaches {
     const fn new() -> Self {
         Self {
-            asyncio_task_cls: OnceLock::new(),
-            asyncio_future_cls: OnceLock::new(),
-            asyncio_get_running_loop_fn: OnceLock::new(),
-            asyncio_task_kwarg_support: OnceLock::new(),
+            asyncio_task_cls: PyOnceLock::new(),
+            asyncio_future_cls: PyOnceLock::new(),
+            asyncio_get_running_loop_fn: PyOnceLock::new(),
+            asyncio_task_kwarg_support: PyOnceLock::new(),
             #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-            asyncio_future_loop_kwnames: OnceLock::new(),
+            asyncio_future_loop_kwnames: PyOnceLock::new(),
             #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-            asyncio_task_loop_kwnames: OnceLock::new(),
+            asyncio_task_loop_kwnames: PyOnceLock::new(),
             #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-            asyncio_task_loop_name_kwnames: OnceLock::new(),
+            asyncio_task_loop_name_kwnames: PyOnceLock::new(),
             #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-            asyncio_task_loop_context_kwnames: OnceLock::new(),
+            asyncio_task_loop_context_kwnames: PyOnceLock::new(),
             #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
-            asyncio_task_loop_name_context_kwnames: OnceLock::new(),
+            asyncio_task_loop_name_context_kwnames: PyOnceLock::new(),
         }
     }
 }
@@ -68,46 +65,32 @@ pub(super) struct TaskKwargSupport {
 }
 
 pub(super) fn asyncio_task_cls(py: Python<'_>) -> PyResult<&Py<PyAny>> {
-    if let Some(cached) = PYTHON_API_CACHES.asyncio_task_cls.get() {
-        return Ok(cached);
-    }
-
-    let loaded = py.import("asyncio")?.getattr("Task")?.unbind();
-    Ok(PYTHON_API_CACHES.asyncio_task_cls.get_or_init(|| loaded))
+    PYTHON_API_CACHES
+        .asyncio_task_cls
+        .get_or_try_init(py, || Ok(py.import("asyncio")?.getattr("Task")?.unbind()))
 }
 
 pub(super) fn asyncio_future_cls(py: Python<'_>) -> PyResult<&Py<PyAny>> {
-    if let Some(cached) = PYTHON_API_CACHES.asyncio_future_cls.get() {
-        return Ok(cached);
-    }
-
-    let loaded = py.import("asyncio")?.getattr("Future")?.unbind();
-    Ok(PYTHON_API_CACHES.asyncio_future_cls.get_or_init(|| loaded))
+    PYTHON_API_CACHES
+        .asyncio_future_cls
+        .get_or_try_init(py, || Ok(py.import("asyncio")?.getattr("Future")?.unbind()))
 }
 
 pub(super) fn asyncio_get_running_loop_fn(py: Python<'_>) -> PyResult<&Py<PyAny>> {
-    if let Some(cached) = PYTHON_API_CACHES.asyncio_get_running_loop_fn.get() {
-        return Ok(cached);
-    }
-
-    let loaded = py
-        .import("asyncio.events")?
-        .getattr("_get_running_loop")?
-        .unbind();
-    Ok(PYTHON_API_CACHES
+    PYTHON_API_CACHES
         .asyncio_get_running_loop_fn
-        .get_or_init(|| loaded))
+        .get_or_try_init(py, || {
+            Ok(py
+                .import("asyncio.events")?
+                .getattr("_get_running_loop")?
+                .unbind())
+        })
 }
 
 pub(super) fn asyncio_task_kwarg_support(py: Python<'_>) -> PyResult<&'static TaskKwargSupport> {
-    if let Some(cached) = PYTHON_API_CACHES.asyncio_task_kwarg_support.get() {
-        return Ok(cached);
-    }
-
-    let support = detect_asyncio_task_kwarg_support(py)?;
-    Ok(PYTHON_API_CACHES
+    PYTHON_API_CACHES
         .asyncio_task_kwarg_support
-        .get_or_init(|| support))
+        .get_or_try_init(py, || detect_asyncio_task_kwarg_support(py))
 }
 
 fn detect_asyncio_task_kwarg_support(py: Python<'_>) -> PyResult<TaskKwargSupport> {
@@ -185,21 +168,11 @@ pub(super) fn call_callable_onearg(
 
 #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
 fn keyword_tuple<const N: usize>(
-    slot: &'static OnceLock<Py<PyTuple>>,
+    slot: &'static PyOnceLock<Py<PyTuple>>,
     py: Python<'_>,
     names: [&Bound<'_, pyo3::types::PyString>; N],
 ) -> PyResult<&'static Py<PyTuple>> {
-    if let Some(tuple) = slot.get() {
-        return Ok(tuple);
-    }
-
-    let tuple = PyTuple::new(py, names)?.unbind();
-    match slot.set(tuple) {
-        Ok(()) => {}
-        Err(_already_initialized) => {}
-    }
-    slot.get()
-        .ok_or_else(|| PyRuntimeError::new_err("failed to initialize keyword tuple cache"))
+    slot.get_or_try_init(py, || Ok(PyTuple::new(py, names)?.unbind()))
 }
 
 #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
@@ -242,5 +215,75 @@ pub(super) fn asyncio_task_kwnames_for_options(
                 python_names::context_kw(py),
             ],
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn python_api_caches_are_safe_under_concurrent_access() {
+        const THREADS: usize = 8;
+
+        crate::initialize_python_for_tests();
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..25 {
+                        Python::attach(|py| {
+                            assert!(
+                                asyncio_task_cls(py)
+                                    .expect("asyncio.Task")
+                                    .bind(py)
+                                    .is_callable()
+                            );
+                            assert!(
+                                asyncio_future_cls(py)
+                                    .expect("asyncio.Future")
+                                    .bind(py)
+                                    .is_callable()
+                            );
+                            assert!(
+                                asyncio_get_running_loop_fn(py)
+                                    .expect("asyncio._get_running_loop")
+                                    .bind(py)
+                                    .is_callable()
+                            );
+                            let _ = asyncio_task_kwarg_support(py).expect("Task keyword support");
+
+                            #[cfg(any(Py_3_12, all(Py_3_11, not(Py_LIMITED_API))))]
+                            {
+                                assert_eq!(
+                                    asyncio_future_loop_kwnames(py)
+                                        .expect("Future keyword names")
+                                        .bind(py)
+                                        .len(),
+                                    1
+                                );
+                                assert_eq!(
+                                    asyncio_task_kwnames_for_options(py, true, true)
+                                        .expect("Task keyword names")
+                                        .bind(py)
+                                        .len(),
+                                    3
+                                );
+                            }
+                        });
+                    }
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().expect("cache worker panicked");
+        }
     }
 }

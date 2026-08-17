@@ -5,7 +5,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
@@ -16,10 +15,7 @@ pub type CallbackId = u64;
 
 #[inline]
 fn call_callback_noargs(py: Python<'_>, callback: &Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // SAFETY: `callback` is a live Python callable owned by `Py<PyAny>`, and the GIL token proves
-    // this thread may call into CPython. PyO3 owns non-null returns and maps null to `PyErr`.
-    unsafe { Bound::from_owned_ptr_or_err(py, ffi::compat::PyObject_CallNoArgs(callback.as_ptr())) }
-        .map(Bound::unbind)
+    Ok(callback.bind(py).call0()?.unbind())
 }
 
 #[inline]
@@ -28,17 +24,7 @@ fn call_callback_onearg(
     callback: &Py<PyAny>,
     arg: &Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    // SAFETY: `callback` and `arg` are live Python objects under the GIL, and the CPython varargs
-    // list is null-terminated. PyO3 takes ownership of successful returns.
-    let ptr = unsafe {
-        ffi::PyObject_CallFunctionObjArgs(
-            callback.as_ptr(),
-            arg.as_ptr(),
-            std::ptr::null_mut::<ffi::PyObject>(),
-        )
-    };
-    // SAFETY: `ptr` is the owned result returned by CPython for the call above.
-    unsafe { Bound::from_owned_ptr_or_err(py, ptr) }.map(Bound::unbind)
+    Ok(callback.bind(py).call1((arg.bind(py),))?.unbind())
 }
 
 enum CallbackArgs {

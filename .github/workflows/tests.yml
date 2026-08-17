@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       python_versions:
-        description: "Space-separated supported Python versions to test (3.10–3.14, plus 3.14t)"
+        description: "Space-separated supported Python versions to test (3.10–3.14)"
         required: false
         type: string
       build_mode:
@@ -133,7 +133,7 @@ jobs:
           import os
           import sys
 
-          supported_versions = {"3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"}
+          supported_versions = {"3.10", "3.11", "3.12", "3.13", "3.14"}
           unsupported_versions = sorted(set(sys.argv[1:]) - supported_versions)
           if unsupported_versions:
               raise SystemExit(
