@@ -44,6 +44,8 @@ Important files:
 
 - `lib.rs`: extension module entry point
 - `bindings/loop_api.rs`: exposes Rust functionality as Python classes and functions
+- `bindings/loop_api/methods.rs`: the single `#[pymethods]` block listing every loop method Python can call
+- `bindings/loop_api/`: one module per group of loop methods (`servers.rs`, `connections.rs`, `tasks.rs`, `process_spawn.rs`, and so on)
 - `engine/loop_core.rs`: core loop state and loop-thread execution
 - `engine/commands.rs`: commands shared by the loop and runtime dispatcher
 - `engine/dispatcher.rs`: coordination-thread runtime work

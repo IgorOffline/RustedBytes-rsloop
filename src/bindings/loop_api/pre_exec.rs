@@ -5,7 +5,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use super::UnixPreExecConfig;
+use super::process_spawn::UnixPreExecConfig;
 
 #[cfg(unix)]
 pub(super) fn apply(command: &mut Command, config: UnixPreExecConfig) {
