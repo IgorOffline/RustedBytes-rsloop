@@ -247,3 +247,159 @@ pub struct PyServer {
 pub struct PyStreamTransport {
     pub core: Arc<StreamTransportCore>,
 }
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver};
+
+    use pyo3::exceptions::PyRuntimeError;
+    use pyo3::prelude::*;
+    use pyo3::types::{PyBytes, PyDict};
+
+    use super::builder::{
+        StreamTransportStateConfig, new_stream_transport_core, stream_transport_state_parts,
+    };
+    use super::protocol::build_protocol_callbacks;
+    use super::{StreamTransportCore, TransportSpawnContext, WriterCommand};
+    use crate::engine::LoopCore;
+
+    #[pyclass]
+    #[derive(Default)]
+    pub(super) struct RecordingProtocol {
+        pub(super) events: Vec<&'static str>,
+        pub(super) received: Vec<Vec<u8>>,
+        pub(super) pause_attempts: usize,
+        pub(super) panic_next_pause: bool,
+        pub(super) fail_next_data: bool,
+        pub(super) keep_open_at_eof: bool,
+    }
+
+    #[pymethods]
+    impl RecordingProtocol {
+        fn connection_made(&mut self, _transport: Py<PyAny>) {
+            self.events.push("made");
+        }
+
+        fn data_received(&mut self, data: &Bound<'_, PyBytes>) -> PyResult<()> {
+            if std::mem::take(&mut self.fail_next_data) {
+                return Err(PyRuntimeError::new_err("intentional data_received failure"));
+            }
+            self.received.push(data.as_bytes().to_vec());
+            self.events.push("data");
+            Ok(())
+        }
+
+        fn eof_received(&mut self) -> bool {
+            self.events.push("eof");
+            self.keep_open_at_eof
+        }
+
+        fn connection_lost(&mut self, _error: Py<PyAny>) {
+            self.events.push("lost");
+        }
+
+        fn pause_writing(&mut self) {
+            self.pause_attempts += 1;
+            assert!(
+                !std::mem::take(&mut self.panic_next_pause),
+                "intentional pause_writing panic"
+            );
+            self.events.push("pause");
+        }
+
+        fn resume_writing(&mut self) {
+            self.events.push("resume");
+        }
+    }
+
+    #[pyclass]
+    #[derive(Default)]
+    pub(super) struct RecordingExceptionHandler {
+        pub(super) messages: Vec<String>,
+        pub(super) exception_types: Vec<String>,
+    }
+
+    #[pymethods]
+    impl RecordingExceptionHandler {
+        fn __call__(&mut self, _loop_obj: Py<PyAny>, context: &Bound<'_, PyDict>) -> PyResult<()> {
+            let message = context
+                .get_item("message")?
+                .expect("exception context message")
+                .extract::<String>()?;
+            let exception = context
+                .get_item("exception")?
+                .expect("exception context value");
+            let exception_type = exception.get_type().name()?.to_string_lossy().into_owned();
+            self.messages.push(message);
+            self.exception_types.push(exception_type);
+            Ok(())
+        }
+    }
+
+    pub(super) fn install_exception_handler(
+        py: Python<'_>,
+        loop_core: &LoopCore,
+    ) -> Py<RecordingExceptionHandler> {
+        let handler =
+            Py::new(py, RecordingExceptionHandler::default()).expect("recording exception handler");
+        loop_core
+            .state
+            .lock()
+            .expect("loop state")
+            .exception_handler = Some(handler.clone_ref(py).into_any());
+        handler
+    }
+
+    pub(super) fn build_test_core(
+        py: Python<'_>,
+    ) -> (
+        Arc<StreamTransportCore>,
+        Receiver<WriterCommand>,
+        Arc<LoopCore>,
+        Py<RecordingProtocol>,
+    ) {
+        let loop_core = LoopCore::new();
+        let protocol = Py::new(py, RecordingProtocol::default()).expect("recording protocol");
+        let protocol_any = protocol.clone_ref(py).into_any();
+        let callbacks =
+            build_protocol_callbacks(py, &protocol_any).expect("recording protocol callbacks");
+        let parts = stream_transport_state_parts(
+            TransportSpawnContext {
+                loop_core: Arc::clone(&loop_core),
+                loop_obj: py.None(),
+                protocol: protocol_any,
+                context: py.None(),
+                context_needs_run: false,
+            },
+            callbacks,
+            StreamTransportStateConfig {
+                io_fd: None,
+                runtime_socket_io: false,
+                extra: HashMap::new(),
+                lazy_socket_family: None,
+                reading: false,
+                writable: true,
+                can_write_eof: false,
+                close_on_write_eof: false,
+                server: None,
+            },
+        );
+        let (writer_tx, writer_rx) = mpsc::channel();
+        let core = new_stream_transport_core(parts, writer_tx, None, None);
+        loop_core.mark_runtime_thread();
+        (core, writer_rx, loop_core, protocol)
+    }
+
+    pub(super) fn shutdown_test_core(
+        core: Arc<StreamTransportCore>,
+        writer_rx: Receiver<WriterCommand>,
+        loop_core: Arc<LoopCore>,
+    ) {
+        loop_core.clear_runtime_thread();
+        drop(core);
+        drop(writer_rx);
+        loop_core.close().expect("close test loop");
+    }
+}

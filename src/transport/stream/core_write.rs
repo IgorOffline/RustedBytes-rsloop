@@ -467,100 +467,13 @@ impl StreamTransportCore {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::mpsc::{self, Receiver};
+    use std::io;
 
     use pyo3::prelude::*;
 
-    use super::{OwnedWriteBuffer, StreamTransportCore};
-    use crate::engine::LoopCore;
-    use crate::transport::stream::builder::{
-        StreamTransportStateConfig, new_stream_transport_core, stream_transport_state_parts,
-    };
-    use crate::transport::stream::protocol::build_protocol_callbacks;
-    use crate::transport::stream::{TransportSpawnContext, WriterCommand};
-
-    #[pyclass]
-    #[derive(Default)]
-    struct RecordingProtocol {
-        events: Vec<&'static str>,
-        pause_attempts: usize,
-        panic_next_pause: bool,
-    }
-
-    #[pymethods]
-    impl RecordingProtocol {
-        fn connection_made(&self, _transport: Py<PyAny>) {}
-
-        fn connection_lost(&mut self, _error: Py<PyAny>) {
-            self.events.push("lost");
-        }
-
-        fn pause_writing(&mut self) {
-            self.pause_attempts += 1;
-            assert!(
-                !std::mem::take(&mut self.panic_next_pause),
-                "intentional pause_writing panic"
-            );
-            self.events.push("pause");
-        }
-
-        fn resume_writing(&mut self) {
-            self.events.push("resume");
-        }
-    }
-
-    fn build_test_core(
-        py: Python<'_>,
-    ) -> (
-        Arc<StreamTransportCore>,
-        Receiver<WriterCommand>,
-        Arc<LoopCore>,
-        Py<RecordingProtocol>,
-    ) {
-        let loop_core = LoopCore::new();
-        let protocol = Py::new(py, RecordingProtocol::default()).expect("recording protocol");
-        let protocol_any = protocol.clone_ref(py).into_any();
-        let callbacks =
-            build_protocol_callbacks(py, &protocol_any).expect("recording protocol callbacks");
-        let parts = stream_transport_state_parts(
-            TransportSpawnContext {
-                loop_core: Arc::clone(&loop_core),
-                loop_obj: py.None(),
-                protocol: protocol_any,
-                context: py.None(),
-                context_needs_run: false,
-            },
-            callbacks,
-            StreamTransportStateConfig {
-                io_fd: None,
-                runtime_socket_io: false,
-                extra: HashMap::new(),
-                lazy_socket_family: None,
-                reading: false,
-                writable: true,
-                can_write_eof: false,
-                close_on_write_eof: false,
-                server: None,
-            },
-        );
-        let (writer_tx, writer_rx) = mpsc::channel();
-        let core = new_stream_transport_core(parts, writer_tx, None, None);
-        loop_core.mark_runtime_thread();
-        (core, writer_rx, loop_core, protocol)
-    }
-
-    fn shutdown_test_core(
-        core: Arc<StreamTransportCore>,
-        writer_rx: Receiver<WriterCommand>,
-        loop_core: Arc<LoopCore>,
-    ) {
-        loop_core.clear_runtime_thread();
-        drop(core);
-        drop(writer_rx);
-        loop_core.close().expect("close test loop");
-    }
+    use super::OwnedWriteBuffer;
+    use crate::transport::stream::test_support::{build_test_core, shutdown_test_core};
+    use crate::transport::stream::tuning::max_write_buffer_size;
 
     #[test]
     fn write_buffer_pauses_and_resumes_only_at_watermark_crossings() {
@@ -697,6 +610,55 @@ mod tests {
 
             core.clear_write_buffer(false);
             shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn write_buffer_cap_rejects_growth_without_corrupting_accounting() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, _protocol) = build_test_core(py);
+            let maximum = max_write_buffer_size();
+
+            assert!(core.record_write_buffer_enqueued(0).is_ok());
+            assert!(
+                core.record_write_buffer_enqueued(maximum)
+                    .expect("write at exact cap")
+            );
+            let err = core
+                .record_write_buffer_enqueued(1)
+                .expect_err("write above cap should fail");
+            assert_eq!(err.kind(), io::ErrorKind::OutOfMemory);
+            assert_eq!(core.get_write_buffer_size(), maximum);
+
+            core.clear_write_buffer(false);
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn closed_writer_channel_clears_accounting_and_closes_transport() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, _protocol) = build_test_core(py);
+            drop(writer_rx);
+
+            core.queue_write(OwnedWriteBuffer::from_slice(b"undeliverable"))
+                .expect("channel failure is converted into transport loss");
+
+            assert!(core.is_closing());
+            assert_eq!(core.get_write_buffer_size(), 0);
+            assert_eq!(
+                core.pending_read_events
+                    .lock()
+                    .expect("pending read events")
+                    .len(),
+                1
+            );
+
+            loop_core.clear_runtime_thread();
+            drop(core);
+            loop_core.close().expect("close test loop");
         });
     }
 }

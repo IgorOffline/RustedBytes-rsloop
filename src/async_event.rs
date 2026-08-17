@@ -33,3 +33,44 @@ impl AsyncEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AsyncEvent;
+
+    #[test]
+    fn notification_wakes_all_current_listeners() {
+        let event = AsyncEvent::new();
+        let mut first = event.listen();
+        let mut second = event.listen();
+
+        event.notify_all();
+
+        assert_eq!(first.try_recv().expect("first listener"), Some(()));
+        assert_eq!(second.try_recv().expect("second listener"), Some(()));
+    }
+
+    #[test]
+    fn listeners_registered_after_notification_wait_for_the_next_one() {
+        let event = AsyncEvent::new();
+        event.notify_all();
+        let mut listener = event.listen();
+
+        assert_eq!(listener.try_recv().expect("pending listener"), None);
+        event.notify_all();
+        assert_eq!(listener.try_recv().expect("notified listener"), Some(()));
+    }
+
+    #[test]
+    fn dropped_listener_does_not_prevent_other_notifications() {
+        let event = AsyncEvent::new();
+        let dropped = event.listen();
+        let mut active = event.listen();
+        drop(dropped);
+
+        event.notify_all();
+
+        assert_eq!(active.try_recv().expect("active listener"), Some(()));
+        assert!(event.waiters.lock().expect("event waiters").is_empty());
+    }
+}

@@ -1299,3 +1299,82 @@ impl LoopCore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod wake_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use futures::task::{ArcWake, noop_waker, waker};
+
+    use super::*;
+
+    struct WakeCounter(AtomicUsize);
+
+    impl ArcWake for WakeCounter {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn loop_wake_coalesces_signals_until_pending_is_cleared() {
+        let wake = Arc::new(LoopWake::new());
+        let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let task_waker = waker(Arc::clone(&counter));
+        wake.ready_waker.register(&task_waker);
+
+        wake.signal();
+        wake.signal();
+        assert!(wake.ready_pending.load(Ordering::Acquire));
+        assert_eq!(counter.0.load(AtomicOrdering::SeqCst), 1);
+
+        wake.ready_pending.store(false, Ordering::Release);
+        wake.ready_waker.register(&task_waker);
+        wake.signal();
+        assert_eq!(counter.0.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn wait_for_wake_observes_a_signal_that_arrived_before_polling() {
+        let wake = Arc::new(LoopWake::new());
+        wake.signal();
+        let mut wait = Box::pin(WaitForWake::new(wake, Duration::from_secs(1)));
+        let task_waker = noop_waker();
+        let mut context = Context::from_waker(&task_waker);
+
+        assert_eq!(wait.as_mut().poll(&mut context), Poll::Ready(()));
+    }
+
+    #[test]
+    fn registered_waiter_is_woken_by_a_cross_thread_signal() {
+        let wake = Arc::new(LoopWake::new());
+        let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        wake.ready_waker.register(&waker(Arc::clone(&counter)));
+
+        let producer_wake = Arc::clone(&wake);
+        std::thread::spawn(move || producer_wake.signal())
+            .join()
+            .expect("signal producer");
+
+        assert!(wake.ready_pending.load(Ordering::Acquire));
+        assert_eq!(counter.0.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn wait_for_wake_completes_when_its_timer_expires() {
+        let runtime = vibeio::RuntimeBuilder::new()
+            .enable_timer(true)
+            .build()
+            .expect("timer-enabled runtime");
+        let wake = Arc::new(LoopWake::new());
+        let started = Instant::now();
+
+        runtime.block_on(WaitForWake::new(
+            Arc::clone(&wake),
+            Duration::from_millis(2),
+        ));
+
+        assert!(!wake.ready_pending.load(Ordering::Acquire));
+        assert!(started.elapsed() >= Duration::from_millis(1));
+    }
+}

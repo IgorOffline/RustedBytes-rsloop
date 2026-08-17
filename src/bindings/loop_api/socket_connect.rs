@@ -240,3 +240,109 @@ pub(super) fn fast_sock_connect<'py>(
     }
     Ok(future_bound)
 }
+
+#[cfg(test)]
+mod tests {
+    use pyo3::types::{PyString, PyTuple};
+
+    use super::*;
+
+    #[test]
+    fn connect_errno_classification_is_exact() {
+        assert!(is_connect_in_progress_errno(libc::EINPROGRESS));
+        assert!(is_connect_in_progress_errno(libc::EALREADY));
+        assert!(is_connect_in_progress_errno(libc::EWOULDBLOCK));
+        assert!(!is_connect_in_progress_errno(libc::ECONNREFUSED));
+
+        assert!(is_already_connected_errno(libc::EISCONN));
+        assert!(is_already_connected_errno(WSAEISCONN));
+        assert!(!is_already_connected_errno(libc::EINPROGRESS));
+    }
+
+    #[test]
+    fn python_socket_errors_preserve_errno_and_connected_classification() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            for errno in [libc::EISCONN, WSAEISCONN] {
+                let err = pyo3::exceptions::PyOSError::new_err((errno, "connected"));
+                assert!(
+                    is_already_connected_socket_error(py, &err).expect("classify connected error")
+                );
+            }
+            assert!(
+                !is_already_connected_socket_error(
+                    py,
+                    &pyo3::exceptions::PyValueError::new_err("not an OS error")
+                )
+                .expect("classify unrelated error")
+            );
+
+            let err = socket_os_error(py, libc::ECONNREFUSED)
+                .expect_err("nonzero SO_ERROR should become OSError");
+            assert!(err.is_instance_of::<pyo3::exceptions::PyOSError>(py));
+            assert_eq!(
+                err.value(py)
+                    .getattr("errno")
+                    .expect("errno attribute")
+                    .extract::<i32>()
+                    .expect("integer errno"),
+                libc::ECONNREFUSED
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn numeric_connect_parser_falls_back_for_names_and_rejects_out_of_range_fds() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let hostname = PyTuple::new(
+                py,
+                [
+                    PyString::new(py, "localhost").into_any(),
+                    80_u16.into_pyobject(py).expect("port").into_any(),
+                ],
+            )
+            .expect("hostname address");
+            assert_eq!(
+                libc_connect_numeric(i64::MAX, hostname.as_any()).expect("hostname fallback"),
+                None
+            );
+
+            let numeric = PyTuple::new(
+                py,
+                [
+                    PyString::new(py, "127.0.0.1").into_any(),
+                    80_u16.into_pyobject(py).expect("port").into_any(),
+                ],
+            )
+            .expect("numeric address");
+            let err = libc_connect_numeric(i64::MAX, numeric.as_any())
+                .expect_err("out-of-range descriptor should fail before libc connect");
+            assert!(err.is_instance_of::<PyRuntimeError>(py));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_so_error_read_works_for_a_connected_socket() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` has room for both descriptors returned by `socketpair`.
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: successful `socketpair` returned two newly owned descriptors.
+        let (socket, _peer) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            assert_eq!(
+                connect_so_error(i64::from(socket.as_raw_fd()), &py.None()).expect("read SO_ERROR"),
+                0
+            );
+        });
+    }
+}

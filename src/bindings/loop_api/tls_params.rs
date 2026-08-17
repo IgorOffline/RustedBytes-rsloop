@@ -104,3 +104,77 @@ impl TlsParams {
         Ok(self.server_settings(py)?.map(Arc::new))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validation_error(params: &TlsParams) -> String {
+        params
+            .validate()
+            .expect_err("TLS-only keyword should fail")
+            .to_string()
+    }
+
+    #[test]
+    fn tls_only_keyword_validation_preserves_observable_error_order() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let hostname = TlsParams {
+                ssl: None,
+                server_hostname: Some(py.None()),
+                handshake_timeout: Some(1.0),
+                shutdown_timeout: Some(2.0),
+            };
+            assert!(validation_error(&hostname).contains("server_hostname"));
+
+            let handshake = TlsParams {
+                ssl: None,
+                server_hostname: None,
+                handshake_timeout: Some(1.0),
+                shutdown_timeout: Some(2.0),
+            };
+            assert!(validation_error(&handshake).contains("ssl_handshake_timeout"));
+
+            let shutdown = TlsParams::without_hostname(None, None, Some(2.0));
+            assert!(validation_error(&shutdown).contains("ssl_shutdown_timeout"));
+        });
+    }
+
+    #[test]
+    fn disabled_tls_has_no_settings_and_enabled_tls_accepts_related_keywords() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let disabled = TlsParams::without_hostname(None, None, None);
+            assert!(!disabled.is_enabled());
+            disabled.validate().expect("plain transport options");
+            assert!(
+                disabled
+                    .client_settings(py)
+                    .expect("client settings")
+                    .is_none()
+            );
+            assert!(
+                disabled
+                    .server_settings(py)
+                    .expect("server settings")
+                    .is_none()
+            );
+            assert!(
+                disabled
+                    .shared_server_settings(py)
+                    .expect("shared settings")
+                    .is_none()
+            );
+
+            let enabled = TlsParams {
+                ssl: Some(py.None()),
+                server_hostname: Some(py.None()),
+                handshake_timeout: Some(1.0),
+                shutdown_timeout: Some(2.0),
+            };
+            assert!(enabled.is_enabled());
+            enabled.validate().expect("TLS keywords with ssl");
+        });
+    }
+}

@@ -279,6 +279,84 @@ pub(super) fn make_python_pipe_file(
     Ok(os.getattr("fdopen")?.call1((dup, mode, 0))?.unbind())
 }
 
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    fn successful_child_command() -> Command {
+        #[cfg(unix)]
+        {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exit 0"]);
+            command
+        }
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit", "0"]);
+            command
+        }
+    }
+
+    #[test]
+    fn process_pipes_tracks_only_descriptors_that_are_open() {
+        let mut child = successful_child_command()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn child");
+
+        let pipes = ProcessPipes::take_from(&mut child, None, None);
+        assert_eq!(pipes.open_pipes(), HashSet::from([0, 1]));
+        assert!(child.stdin.is_none());
+        assert!(child.stdout.is_none());
+        assert!(child.stderr.is_none());
+        child.wait().expect("wait for child");
+    }
+
+    #[test]
+    fn reader_overrides_participate_in_open_pipe_bookkeeping() {
+        let mut child = successful_child_command().spawn().expect("spawn child");
+        let stdout_override = Some(Box::new(Cursor::new(Vec::<u8>::new())) as BoxedProcessReader);
+        let stderr_override = Some(Box::new(Cursor::new(Vec::<u8>::new())) as BoxedProcessReader);
+
+        let pipes = ProcessPipes::take_from(&mut child, stdout_override, stderr_override);
+        assert_eq!(pipes.open_pipes(), HashSet::from([1, 2]));
+        child.wait().expect("wait for child");
+    }
+
+    #[test]
+    fn text_mode_extra_entries_expose_encoding_and_error_policy() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            assert!(process_text_extra_entries(py, None).is_none());
+            let config = ProcessTextConfig {
+                encoding: "utf-8".to_owned(),
+                errors: "surrogateescape".to_owned(),
+                translate_newlines: true,
+            };
+
+            let extra = process_text_extra_entries(py, Some(&config)).expect("text extras");
+            assert_eq!(extra.len(), 2);
+            assert_eq!(
+                extra["text_encoding"]
+                    .extract::<String>(py)
+                    .expect("encoding string"),
+                "utf-8"
+            );
+            assert_eq!(
+                extra["text_errors"]
+                    .extract::<String>(py)
+                    .expect("errors string"),
+                "surrogateescape"
+            );
+        });
+    }
+}
+
 #[cfg(windows)]
 pub(super) fn make_python_pipe_file_from_handle(
     py: Python<'_>,

@@ -130,3 +130,92 @@ fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::process::Stdio;
+
+    use super::*;
+
+    fn pipe() -> (OwnedFd, OwnedFd) {
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` points to space for the two descriptors written by `pipe`.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: successful `pipe` returned two newly owned descriptors.
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+    }
+
+    #[test]
+    fn pass_fds_clears_close_on_exec_without_changing_other_flags() {
+        let (_read_end, write_end) = pipe();
+        let fd = write_end.as_raw_fd();
+        // SAFETY: `fd` is owned for the duration of the test.
+        let original = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(original, -1);
+        // SAFETY: `fd` is valid and F_SETFD accepts the returned descriptor flags.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, original | libc::FD_CLOEXEC) },
+            -1
+        );
+
+        clear_pass_fds_cloexec(&[fd]).expect("clear close-on-exec");
+
+        // SAFETY: `fd` remains owned and valid.
+        let updated = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(updated & libc::FD_CLOEXEC, 0);
+        assert_eq!(updated & !libc::FD_CLOEXEC, original & !libc::FD_CLOEXEC);
+    }
+
+    #[test]
+    fn invalid_pass_fd_is_reported_before_exec() {
+        let config = UnixPreExecConfig {
+            restore_signals: false,
+            pass_fds: vec![-1],
+            ..UnixPreExecConfig::default()
+        };
+
+        let err = apply_in_child(&config).expect_err("invalid descriptor should fail");
+        assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[test]
+    fn pre_exec_applies_umask_and_starts_a_new_session_in_the_child_only() {
+        let interpreter = std::env::var_os("PYO3_PYTHON").unwrap_or_else(|| "python3".into());
+        let mut command = Command::new(interpreter);
+        command
+            .args([
+                "-c",
+                "import os; old = os.umask(0); print(f'{old:04o}'); print(os.getpid(), os.getsid(0))",
+            ])
+            .stdout(Stdio::piped());
+        apply(
+            &mut command,
+            UnixPreExecConfig {
+                restore_signals: false,
+                start_new_session: true,
+                umask: Some(0o27),
+                ..UnixPreExecConfig::default()
+            },
+        );
+
+        let output = command.output().expect("spawn configured child");
+        assert!(
+            output.status.success(),
+            "child failed: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 child output");
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next().expect("umask output").trim(), "0027");
+        let ids = lines
+            .next()
+            .expect("process ids")
+            .split_whitespace()
+            .map(|value| value.parse::<u32>().expect("numeric process id"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], ids[1]);
+    }
+}

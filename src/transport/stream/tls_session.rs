@@ -345,3 +345,131 @@ pub(super) fn flush_tls_close_io_locked(
 pub(super) fn tls_io_error(err: rustls::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err.to_string())
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::io::{BufReader, Cursor, Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    use pyo3::Python;
+    use rustls::pki_types::ServerName;
+    use rustls::{ClientConfig, RootCertStore};
+
+    use super::*;
+    use crate::transport::stream::server_core::tests::{build_test_server, shutdown_test_server};
+
+    const CERTFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/cert.pem");
+
+    fn client_connection() -> ClientConnection {
+        let cert_data = fs::read(CERTFILE).expect("read certificate fixture");
+        let certs = rustls_pemfile::certs(&mut BufReader::new(Cursor::new(cert_data)))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse certificate fixture");
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(certs[0].clone())
+            .expect("trust certificate fixture");
+        let config = ClientConfig::builder_with_protocol_versions(rustls::DEFAULT_VERSIONS)
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("localhost".to_owned()).expect("valid server name"),
+        )
+        .expect("create client connection")
+    }
+
+    fn client_tls_state(stream: UnixStream) -> SharedTlsIoState {
+        Arc::new(Mutex::new(TlsIoState {
+            stream: StreamKind::Unix(stream),
+            connection: TlsConnectionKind::Client(client_connection()),
+            shutdown_timeout: Duration::from_millis(50),
+        }))
+    }
+
+    #[test]
+    fn handshake_timeout_and_closed_server_cancel_before_io() {
+        let (stream, _peer) = UnixStream::pair().expect("Unix socketpair");
+        let tls_state = client_tls_state(stream);
+        let err = complete_tls_handshake(&tls_state, Duration::ZERO, None)
+            .expect_err("zero timeout should fail before handshake I/O");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (server, loop_core) = build_test_server(py);
+            let weak = Arc::downgrade(&server);
+            server.close();
+            let err = complete_tls_handshake(&tls_state, Duration::from_secs(1), Some(&weak))
+                .expect_err("closed server should cancel handshake");
+            assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+            shutdown_test_server(server, loop_core);
+        });
+    }
+
+    #[test]
+    fn server_closed_detection_handles_live_closed_and_dropped_servers() {
+        assert!(!tls_server_closed(None));
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (server, loop_core) = build_test_server(py);
+            let weak = Arc::downgrade(&server);
+            assert!(!tls_server_closed(Some(&weak)));
+            server.close();
+            assert!(tls_server_closed(Some(&weak)));
+            shutdown_test_server(server, Arc::clone(&loop_core));
+            assert!(tls_server_closed(Some(&weak)));
+            drop(loop_core);
+        });
+    }
+
+    #[test]
+    fn handshake_read_reports_eof_before_completion() {
+        let (stream, peer) = UnixStream::pair().expect("Unix socketpair");
+        let fd = i64::from(stream.as_raw_fd());
+        let tls_state = client_tls_state(stream);
+        drop(peer);
+
+        let err = continue_tls_handshake_read(&tls_state, fd, true)
+            .expect_err("closed peer should end handshake");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn malformed_peer_records_become_invalid_data_errors() {
+        let (stream, mut peer) = UnixStream::pair().expect("Unix socketpair");
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let tls_state = client_tls_state(stream);
+
+        assert!(!tls_handshake_step(&tls_state).expect("flush client hello"));
+        let mut hello = [0_u8; 4096];
+        assert!(peer.read(&mut hello).expect("read client hello") > 0);
+        peer.write_all(&[0_u8; 16])
+            .expect("write malformed TLS record");
+
+        let err = tls_handshake_step(&tls_state).expect_err("malformed TLS should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn abort_closes_the_socket_and_error_conversion_keeps_tls_context() {
+        let (stream, mut peer) = UnixStream::pair().expect("Unix socketpair");
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("peer read timeout");
+        let expected_fd = i64::from(stream.as_raw_fd());
+        let tls_state = client_tls_state(stream);
+        assert_eq!(tls_socket_wait_target(&tls_state), (expected_fd, true));
+
+        abort_tls_writer(&tls_state).expect("abort TLS writer");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).expect("observe socket shutdown"), 0);
+
+        let err = tls_io_error(rustls::Error::General("bad peer record".to_owned()));
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("bad peer record"));
+    }
+}

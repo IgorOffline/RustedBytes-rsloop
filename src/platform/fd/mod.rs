@@ -231,3 +231,134 @@ pub fn socket_so_error(fd: RawFd) -> io::Result<i32> {
         Err(io::Error::last_os_error())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_objects_accept_raw_integers_and_fileno_methods() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            assert_eq!(
+                fileobj_to_fd(py, 42_i64.into_pyobject(py).expect("integer").as_any())
+                    .expect("integer fd"),
+                42
+            );
+            let socket = py
+                .import("socket")
+                .expect("import socket")
+                .call_method0("socket")
+                .expect("create socket");
+            let fd = fileobj_to_fd(py, &socket).expect("socket fileno");
+            assert!(fd >= 0);
+            let keepalive = fileobj_keepalive(&socket);
+            assert!(keepalive.bind(py).is(&socket));
+            socket.call_method0("close").expect("close socket");
+        });
+    }
+
+    #[test]
+    fn retryable_python_socket_errors_are_classified_narrowly() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            assert!(
+                is_retryable_socket_error(
+                    py,
+                    &pyo3::exceptions::PyBlockingIOError::new_err("would block")
+                )
+                .expect("classify BlockingIOError")
+            );
+            assert!(
+                is_retryable_socket_error(
+                    py,
+                    &pyo3::exceptions::PyInterruptedError::new_err("interrupted")
+                )
+                .expect("classify InterruptedError")
+            );
+            assert!(
+                !is_retryable_socket_error(py, &pyo3::exceptions::PyValueError::new_err("other"))
+                    .expect("classify ValueError")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn errno_helpers_cover_progress_connected_and_unrelated_errors() {
+        assert!(is_connect_in_progress_errno(libc::EINPROGRESS));
+        assert!(is_connect_in_progress_errno(libc::EALREADY));
+        assert!(is_connect_in_progress_errno(libc::EWOULDBLOCK));
+        assert!(!is_connect_in_progress_errno(libc::ECONNREFUSED));
+        assert!(is_already_connected_errno(libc::EISCONN));
+        assert!(!is_already_connected_errno(libc::EINPROGRESS));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_reports_pipe_readiness_hangup_and_invalid_descriptors() {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` has room for both descriptors returned by `pipe`.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: successful `pipe` returned two owned descriptors.
+        let (read_end, write_end) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        assert_eq!(
+            poll_fd(i64::from(read_end.as_raw_fd()), true, false, 0).expect("poll empty pipe"),
+            (false, false)
+        );
+        assert_eq!(
+            poll_fd(i64::from(write_end.as_raw_fd()), false, true, 0).expect("poll writable pipe"),
+            (false, true)
+        );
+
+        let mut writer = std::fs::File::from(write_end);
+        writer.write_all(b"x").expect("write pipe byte");
+        assert_eq!(
+            poll_fd(i64::from(read_end.as_raw_fd()), true, false, 0).expect("poll readable pipe"),
+            (true, false)
+        );
+        drop(writer);
+        assert_eq!(
+            poll_fd(i64::from(read_end.as_raw_fd()), true, false, 0).expect("poll pipe hangup"),
+            (true, false)
+        );
+
+        let err = poll_fd(i64::from(i32::MAX), true, false, 0)
+            .expect_err("unopened descriptor should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            poll_fd(-1, true, false, 0).expect("negative fd is ignored"),
+            (false, false)
+        );
+        assert_eq!(
+            poll_fd(-1, false, false, 0).expect("no interests"),
+            (false, false)
+        );
+        assert!(raw_fd_to_c_int(i64::MAX).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connected_socket_has_no_pending_so_error() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let mut fds = [-1; 2];
+        // SAFETY: `fds` has room for the connected pair returned by `socketpair`.
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: successful `socketpair` returned two owned descriptors.
+        let (client, _server) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+
+        assert_eq!(
+            socket_so_error(i64::from(client.as_raw_fd())).expect("read SO_ERROR"),
+            0
+        );
+    }
+}

@@ -423,9 +423,202 @@ fn apply_common_process_kwargs(
         if apply_process_basic_kw(py, command, &key, &value)? {
             continue;
         }
-        apply_unix_process_kw(py, &mut spawn_config.unix, &key, &value)?;
+        if !apply_unix_process_kw(py, &mut spawn_config.unix, &key, &value)? {
+            return Err(PyTypeError::new_err(format!(
+                "unsupported subprocess keyword: {key}"
+            )));
+        }
     }
 
     pre_exec::apply(command, spawn_config.unix.clone());
     Ok(spawn_config)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use pyo3::types::{PyDict, PyString, PyTuple};
+
+    use super::*;
+
+    fn py_string(py: Python<'_>, value: &str) -> Py<PyAny> {
+        PyString::new(py, value).unbind().into_any()
+    }
+
+    #[test]
+    fn shell_and_exec_commands_preserve_program_and_argument_boundaries() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let shell = shell_command(py, &py_string(py, "printf '%s' hello world"))
+                .expect("build shell command");
+            #[cfg(unix)]
+            {
+                assert_eq!(shell.get_program(), OsStr::new("/bin/sh"));
+                assert_eq!(
+                    shell.get_args().collect::<Vec<_>>(),
+                    [OsStr::new("-c"), OsStr::new("printf '%s' hello world")]
+                );
+            }
+
+            let argv = PyTuple::new(py, ["one", "two words"])
+                .expect("argv")
+                .unbind();
+            let command =
+                exec_command(py, &py_string(py, "program"), &argv).expect("build exec command");
+            assert_eq!(command.get_program(), OsStr::new("program"));
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [OsStr::new("one"), OsStr::new("two words")]
+            );
+        });
+    }
+
+    #[test]
+    fn text_mode_parsing_handles_defaults_overrides_and_conflicts() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            assert!(
+                parse_process_text_config(py, false, None, None, None)
+                    .expect("binary mode")
+                    .is_none()
+            );
+
+            let explicit = parse_process_text_config(
+                py,
+                false,
+                Some(py_string(py, "utf-16")),
+                Some(py_string(py, "replace")),
+                Some(true),
+            )
+            .expect("explicit text mode")
+            .expect("text config");
+            assert_eq!(explicit.encoding, "utf-16");
+            assert_eq!(explicit.errors, "replace");
+            assert!(explicit.translate_newlines);
+
+            let defaults = parse_process_text_config(py, true, None, None, None)
+                .expect("default text mode")
+                .expect("text config");
+            assert!(!defaults.encoding.is_empty());
+            assert_eq!(defaults.errors, "strict");
+
+            let err = parse_process_text_config(py, true, None, None, Some(false))
+                .err()
+                .expect("conflicting text flags should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn common_kwargs_apply_cwd_and_environment_and_reject_unknown_keys() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("cwd", "/private/tmp").expect("cwd keyword");
+            let env = PyDict::new(py);
+            env.set_item("RSLOOP_TEST_ENV", "present")
+                .expect("environment entry");
+            kwargs.set_item("env", env).expect("env keyword");
+            let mut command = Command::new("program");
+
+            apply_common_process_kwargs(py, &mut command, Some(&kwargs))
+                .expect("apply common kwargs");
+
+            assert_eq!(
+                command.get_current_dir(),
+                Some(std::path::Path::new("/private/tmp"))
+            );
+            assert!(command.get_envs().any(|(key, value)| {
+                key == OsStr::new("RSLOOP_TEST_ENV") && value == Some(OsStr::new("present"))
+            }));
+
+            let unknown = PyDict::new(py);
+            unknown
+                .set_item("definitely_unknown", true)
+                .expect("unknown keyword");
+            let err = apply_common_process_kwargs(py, &mut Command::new("program"), Some(&unknown))
+                .err()
+                .expect("unknown keyword should not be silently ignored");
+            assert!(err.is_instance_of::<PyTypeError>(py));
+            assert!(err.to_string().contains("definitely_unknown"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_kwargs_parse_flags_fds_identity_and_umask() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let mut config = UnixPreExecConfig::default();
+            assert!(
+                apply_unix_process_kw(
+                    py,
+                    &mut config,
+                    "restore_signals",
+                    &false.into_pyobject(py).expect("bool")
+                )
+                .expect("restore_signals")
+            );
+            assert!(
+                apply_unix_process_kw(
+                    py,
+                    &mut config,
+                    "start_new_session",
+                    &true.into_pyobject(py).expect("bool")
+                )
+                .expect("start_new_session")
+            );
+            let fds = PyTuple::new(py, [3, 8]).expect("pass_fds");
+            apply_unix_process_kw(py, &mut config, "pass_fds", fds.as_any()).expect("pass_fds");
+            apply_unix_process_kw(
+                py,
+                &mut config,
+                "process_group",
+                17_i32.into_pyobject(py).expect("process group").as_any(),
+            )
+            .expect("process_group");
+            apply_unix_process_kw(
+                py,
+                &mut config,
+                "umask",
+                0o27_i32.into_pyobject(py).expect("umask").as_any(),
+            )
+            .expect("umask");
+            apply_unix_process_kw(
+                py,
+                &mut config,
+                "user",
+                123_u32.into_pyobject(py).expect("uid").as_any(),
+            )
+            .expect("user");
+            apply_unix_process_kw(
+                py,
+                &mut config,
+                "group",
+                456_u32.into_pyobject(py).expect("gid").as_any(),
+            )
+            .expect("group");
+
+            assert!(!config.restore_signals);
+            assert!(config.start_new_session);
+            assert_eq!(config.pass_fds, [3, 8]);
+            assert_eq!(config.process_group, Some(17));
+            assert_eq!(config.umask, Some(0o27));
+            assert_eq!(config.uid, Some(123));
+            assert_eq!(config.gid, Some(456));
+
+            let invalid = 0o1000_i32.into_pyobject(py).expect("invalid umask");
+            let err = apply_unix_process_kw(py, &mut config, "umask", invalid.as_any())
+                .expect_err("out-of-range umask should fail");
+            assert!(err.is_instance_of::<PyValueError>(py));
+
+            let preexec = py
+                .eval(pyo3::ffi::c_str!("lambda: None"), None, None)
+                .expect("preexec function");
+            let err = apply_unix_process_kw(py, &mut config, "preexec_fn", &preexec)
+                .expect_err("preexec_fn should remain unsupported");
+            assert!(err.is_instance_of::<PyNotImplementedError>(py));
+        });
+    }
 }

@@ -206,4 +206,39 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn accepts_pkcs1_and_sec1_private_key_pem_labels() {
+        use rustls::pki_types::PrivateKeyDer;
+
+        let pkcs1 = load_private_key(
+            b"-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n".to_vec(),
+        )
+        .expect("PKCS#1 PEM key");
+        assert!(matches!(pkcs1, PrivateKeyDer::Pkcs1(_)));
+
+        let sec1 = load_private_key(
+            b"-----BEGIN EC PRIVATE KEY-----\nAQID\n-----END EC PRIVATE KEY-----\n".to_vec(),
+        )
+        .expect("SEC1 PEM key");
+        assert!(matches!(sec1, PrivateKeyDer::Sec1(_)));
+    }
+
+    #[test]
+    fn missing_identity_files_surface_the_io_error() {
+        crate::initialize_python_for_tests();
+        let result = load_pem_identity(
+            "/definitely/missing/rsloop-cert.pem",
+            "/definitely/missing/rsloop-key.pem",
+            None,
+        );
+        let Err(error) = result else {
+            panic!("missing certificate should fail");
+        };
+
+        Python::attach(|py| {
+            let message = error.value(py).to_string();
+            assert!(message.contains("No such file") || message.contains("cannot find"));
+        });
+    }
 }

@@ -235,6 +235,140 @@ impl PyTimerHandle {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use pyo3::ffi::c_str;
+    use pyo3::types::PyTuple;
+
+    use super::*;
+    use crate::context::capture_context;
+
+    fn callback_with_args(py: Python<'_>, id: CallbackId, args: Py<PyTuple>) -> ReadyCallback {
+        let callback = py
+            .eval(c_str!("lambda *args: args"), None, None)
+            .expect("build callback")
+            .unbind();
+        let (context, needs_run) = capture_context(py, None).expect("capture context");
+        ReadyCallback::new(
+            py,
+            id,
+            CallbackKind::Soon,
+            callback,
+            args,
+            context,
+            needs_run,
+        )
+    }
+
+    #[test]
+    fn ready_callback_invokes_zero_one_and_many_argument_fast_paths() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            for (id, values) in [(1, Vec::<i32>::new()), (2, vec![10]), (3, vec![10, 20, 30])] {
+                let args = PyTuple::new(py, &values).expect("callback args").unbind();
+                let ready = callback_with_args(py, id, args);
+                let result = ready.invoke(py).expect("invoke callback");
+                assert_eq!(
+                    result.extract::<Vec<i32>>(py).expect("tuple result"),
+                    values
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn ready_callback_runs_in_its_captured_context() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let contextvars = py.import("contextvars").expect("import contextvars");
+            let var = contextvars
+                .getattr("ContextVar")
+                .expect("ContextVar")
+                .call1(("ready_value",))
+                .expect("create ContextVar");
+            var.call_method1("set", ("captured",))
+                .expect("set captured value");
+            let callback = var.getattr("get").expect("ContextVar.get").unbind();
+            let (context, needs_run) = capture_context(py, None).expect("capture context");
+            var.call_method1("set", ("ambient",))
+                .expect("set ambient value");
+            let ready = ReadyCallback::new(
+                py,
+                7,
+                CallbackKind::Timer,
+                callback,
+                PyTuple::empty(py).unbind(),
+                context,
+                needs_run,
+            );
+
+            assert_eq!(
+                ready
+                    .invoke(py)
+                    .expect("invoke callback")
+                    .extract::<String>(py)
+                    .expect("callback string"),
+                "captured"
+            );
+            assert_eq!(
+                var.call_method0("get")
+                    .expect("read ambient value")
+                    .extract::<String>()
+                    .expect("ambient string"),
+                "ambient"
+            );
+        });
+    }
+
+    #[test]
+    fn handle_cancellation_and_metadata_are_consistent() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let ready = callback_with_args(py, 99, PyTuple::empty(py).unbind());
+            assert_eq!(ready.id(), 99);
+            assert!(matches!(ready.kind(), CallbackKind::Soon));
+            assert!(!ready.cancelled());
+            assert!(!ready.callback().bind(py).is_none());
+            assert!(!ready.context().bind(py).is_none());
+            assert!(ready.context_needs_run());
+
+            let handle = PyHandle::new(ready);
+            assert!(!handle.cancelled());
+            handle.cancel().expect("cancel handle");
+            assert!(handle.cancelled());
+            assert!(handle.ready().cancelled());
+            assert_eq!(handle.__repr__(), "<Handle id=99 cancelled=true>");
+        });
+    }
+
+    #[test]
+    fn timer_handle_cancels_live_callback_and_tolerates_a_dropped_one() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let ready = Arc::new(callback_with_args(py, 12, PyTuple::empty(py).unbind()));
+            let timer = PyTimerHandle::new(12, 1.25, &ready);
+            assert!((timer.when() - 1.25).abs() < f64::EPSILON);
+            assert!(!timer.cancelled());
+
+            timer.cancel().expect("cancel timer");
+            assert!(timer.cancelled());
+            assert!(ready.cancelled());
+            assert_eq!(
+                timer.__repr__(),
+                "<TimerHandle id=12 when=1.250000 cancelled=true>"
+            );
+
+            let dropped = Arc::new(callback_with_args(py, 13, PyTuple::empty(py).unbind()));
+            let dropped_timer = PyTimerHandle::new(13, 2.0, &dropped);
+            drop(dropped);
+            dropped_timer
+                .cancel()
+                .expect("cancelling expired weak callback is harmless");
+            assert!(dropped_timer.cancelled());
+        });
+    }
+}
+
 #[pymethods]
 impl PyTimerHandle {
     fn cancel(&self) -> PyResult<()> {

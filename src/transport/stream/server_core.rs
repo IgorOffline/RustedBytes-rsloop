@@ -242,3 +242,119 @@ impl ServerCore {
         }
     }
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::async_event::AsyncEvent;
+    use crate::engine::LoopCore;
+    use crate::transport::stream::ServerState;
+
+    pub(in crate::transport::stream) fn build_test_server(
+        py: Python<'_>,
+    ) -> (Arc<ServerCore>, Arc<LoopCore>) {
+        let loop_core = LoopCore::new();
+        loop_core.mark_runtime_thread();
+        let server = Arc::new(ServerCore {
+            loop_core: Arc::clone(&loop_core),
+            loop_obj: py.None(),
+            protocol_factory: py.None(),
+            context: py.None(),
+            context_needs_run: false,
+            sockets: Vec::new(),
+            state: Mutex::new(ServerState {
+                closed: false,
+                serving: false,
+                listeners: Vec::new(),
+            }),
+            accept_tasks: Mutex::new(Vec::new()),
+            accept_fds: Mutex::new(Vec::new()),
+            active_connections: AtomicUsize::new(0),
+            pending_tls_handshakes: AtomicUsize::new(0),
+            tls_overload_reported: AtomicBool::new(false),
+            closed_notify: AsyncEvent::new(),
+            cleanup_path: None,
+            tls: None,
+        });
+        (server, loop_core)
+    }
+
+    pub(in crate::transport::stream) fn shutdown_test_server(
+        server: Arc<ServerCore>,
+        loop_core: Arc<LoopCore>,
+    ) {
+        server.close();
+        loop_core.clear_runtime_thread();
+        drop(server);
+        loop_core.close().expect("close test loop");
+    }
+
+    #[test]
+    fn server_serving_close_and_connection_notifications_are_idempotent() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (server, loop_core) = build_test_server(py);
+            assert!(!server.is_serving());
+            assert!(!server.is_closed());
+
+            server.spawn_accept_tasks();
+            assert!(server.is_serving());
+            server.spawn_accept_tasks();
+            assert!(server.is_serving());
+
+            server.connection_opened();
+            assert_eq!(server.active_connections.load(Ordering::SeqCst), 1);
+            let mut connection_notice = server.closed_notify.listen();
+            server.connection_lost();
+            assert_eq!(server.active_connections.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                connection_notice.try_recv().expect("connection notice"),
+                Some(())
+            );
+
+            let mut close_notice = server.closed_notify.listen();
+            server.close();
+            assert!(server.is_closed());
+            assert!(!server.is_serving());
+            assert_eq!(close_notice.try_recv().expect("close notice"), Some(()));
+            server.close();
+
+            shutdown_test_server(server, loop_core);
+        });
+    }
+
+    #[test]
+    fn tls_admission_enforces_the_limit_and_guard_drop_releases_slots() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (server, loop_core) = build_test_server(py);
+            let limit = max_pending_tls_handshakes();
+            let guards = (0..limit)
+                .map(|_| {
+                    server
+                        .reserve_tls_handshake()
+                        .expect("slot below admission limit")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(server.pending_tls_handshakes.load(Ordering::Acquire), limit);
+            assert!(server.reserve_tls_handshake().is_none());
+
+            server.tls_overload_reported.store(true, Ordering::Release);
+            drop(guards);
+            assert_eq!(server.pending_tls_handshakes.load(Ordering::Acquire), 0);
+            assert!(!server.tls_overload_reported.load(Ordering::Acquire));
+
+            let guard = server
+                .reserve_tls_handshake()
+                .expect("released slot can be reused");
+            server.close();
+            assert!(server.reserve_tls_handshake().is_none());
+            drop(guard);
+
+            shutdown_test_server(server, loop_core);
+        });
+    }
+}
