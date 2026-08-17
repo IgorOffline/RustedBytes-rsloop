@@ -34,6 +34,7 @@ use crate::fd_ops;
 mod accept;
 mod buffers;
 mod builder;
+#[cfg(unix)]
 mod connect;
 mod core_events;
 mod core_protocol;
@@ -67,6 +68,7 @@ pub(crate) use accept::{run_server_accept_task, spawn_accepted_transport_with_py
 use buffers::{OwnedWriteBuffer, ReadBufferPool};
 use builder::make_stream_extra;
 pub use builder::task_locals_for_loop;
+#[cfg(unix)]
 pub(crate) use connect::run_connect_watch_task;
 pub use fast::{PyFastStreamReader, PyFastStreamWriter, open_connection, start_server};
 pub use io_targets::ReaderTarget;

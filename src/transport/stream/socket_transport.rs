@@ -29,7 +29,6 @@ use super::builder::{
     StreamTransportStateConfig, detached_socket_handle, fail_transport_worker_start,
     new_py_stream_transport, new_stream_transport_core, stream_transport_state_parts, tcp_family,
 };
-#[cfg(unix)]
 use super::io_targets::LazyWriterTarget;
 use super::io_targets::{LazyWriterConfig, ReaderTarget, StreamKind, TaskedDirectWriter};
 #[cfg(unix)]

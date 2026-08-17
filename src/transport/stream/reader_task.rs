@@ -31,12 +31,10 @@ use vibeio::net::TcpStream as VibeTcpStream;
 use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
 
 use super::buffers::ReadBufferPool;
+#[cfg(windows)]
+use super::tuning::SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES;
 use super::tuning::{
     MAX_STREAM_READ_BUFFER_SIZE, OWNED_READ_HANDOFF_MIN_BYTES, STREAM_READ_BUFFER_SIZE,
-};
-#[cfg(windows)]
-use super::tuning::{
-    SERVER_POLL_READER_TINY_TRIGGER_MAX_BYTES, SERVER_POLL_READER_WRITE_THRESHOLD,
 };
 use super::{PendingReadEvent, StreamTransportCore};
 

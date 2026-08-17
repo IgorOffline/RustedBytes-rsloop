@@ -6,7 +6,9 @@
 //! `spawn_accept_tasks`, so `create_server(start_serving=False)` is just a
 //! `ServerCore` with idle listeners.
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io;
 use std::net::TcpListener as StdTcpListener;
 #[cfg(unix)]

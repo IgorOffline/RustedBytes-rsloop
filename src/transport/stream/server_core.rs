@@ -12,6 +12,7 @@ use std::net::TcpStream as StdTcpStream;
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
