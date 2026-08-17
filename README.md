@@ -392,6 +392,40 @@ uvloop         0.133182     0.127404         37,543     31.5 MiB        1.46x   
 asyncio        0.302337     0.299813         16,538     29.6 MiB        3.32x       232.5%
 ```
 
+The production-shaped workload matrix exercises HTTP, WebSocket libraries,
+TLS, mixed message sizes, backpressure, and connection lifecycle behavior:
+
+```bash
+uv run --with uvloop python benchmarks/workload_matrix.py \
+  --loops rsloop,uvloop \
+  --warmups 1 \
+  --repeat 5
+```
+
+Representative output from the same macOS arm64 / CPython 3.14 release build
+on August 17, 2026 is below. Throughput is traffic-only operations per second,
+except for `bulk_transfer`, which reports traffic MiB/s.
+
+| Scenario | rsloop | uvloop | rsloop difference | rsloop p95 | uvloop p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| HTTP keep-alive | 85,392 | 73,348 | +16.4% | 0.275 ms | 0.253 ms |
+| TLS HTTP | 49,669 | 37,281 | +33.2% | 0.426 ms | 0.505 ms |
+| Raw WebSocket | 6,103 | 6,365 | -4.1% | 4.508 ms | 3.315 ms |
+| Raw WebSocket over TLS | 5,768 | 5,831 | -1.1% | 3.115 ms | 3.484 ms |
+| `websockets` | 38,555 | 40,172 | -4.0% | 0.476 ms | 0.471 ms |
+| `websockets` over TLS | 37,939 | 25,510 | +48.7% | 0.527 ms | 0.777 ms |
+| aiohttp WebSocket | 47,899 | 49,592 | -3.4% | 0.448 ms | 0.436 ms |
+| aiohttp WebSocket over TLS | 47,017 | 30,246 | +55.5% | 0.471 ms | 0.629 ms |
+| Starlette WebSocket | 30,296 | 24,027 | +26.1% | 0.623 ms | 0.824 ms |
+| Starlette WebSocket over TLS | 31,624 | 21,968 | +44.0% | 0.590 ms | 0.878 ms |
+| Mixed streams | 79,180 | 47,011 | +68.4% | 0.267 ms | 0.449 ms |
+| Bulk transfer (MiB/s) | 4,495.8 | 2,494.1 | +80.3% | 7.000 ms | 12.784 ms |
+| Idle activation | 35,651 | 38,239 | -6.8% | 4.276 ms | 4.200 ms |
+
+These ordinary matrix defaults are intentionally short enough for local smoke
+and CI runs. Use `--sustained` and compare repeated runs before drawing
+performance conclusions for a deployment.
+
 See [`benchmarks/README.md`](./benchmarks/README.md) for workload details and
 extra flags, and [`examples/README.md`](./examples/README.md) for the FastAPI
 loop comparison example.
