@@ -50,7 +50,8 @@ Important files:
 - `engine/commands.rs`: commands shared by the loop and runtime dispatcher
 - `engine/dispatcher.rs`: coordination-thread runtime work
 - `engine/callbacks.rs`: callback handles and scheduling helpers
-- `transport/stream/`: stream transports, servers, fast streams, and I/O workers
+- `transport/stream/mod.rs`: the transport and server core types every stream module shares
+- `transport/stream/`: one module per concern (`socket_transport.rs`, `tls_transport.rs`, `accept.rs`, `reader.rs`, `writer.rs`, `fast.rs`, and so on)
 - `transport/process/`: subprocess and pipe transport support
 - `transport/tls/`: TLS configuration and certificate material
 - `platform/fd/`: lower-level cross-platform descriptor work
