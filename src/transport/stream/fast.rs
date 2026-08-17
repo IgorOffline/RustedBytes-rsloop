@@ -150,7 +150,29 @@ impl ReadBuffer {
 
 #[cfg(test)]
 mod read_buffer_tests {
+    use proptest::prelude::*;
+
     use super::ReadBuffer;
+
+    #[derive(Clone, Debug)]
+    enum ReadOperation {
+        Extend(Vec<u8>),
+        ExtendOwned(Vec<u8>),
+        Consume(usize),
+        ConsumeAll,
+        Replace(Vec<u8>),
+    }
+
+    fn read_operation() -> impl Strategy<Value = ReadOperation> {
+        let bytes = || prop::collection::vec(any::<u8>(), 0..8192);
+        prop_oneof![
+            4 => bytes().prop_map(ReadOperation::Extend),
+            4 => bytes().prop_map(ReadOperation::ExtendOwned),
+            5 => (0_usize..16_384).prop_map(ReadOperation::Consume),
+            1 => Just(ReadOperation::ConsumeAll),
+            2 => bytes().prop_map(ReadOperation::Replace),
+        ]
+    }
 
     #[test]
     fn releases_oversized_allocation_after_consuming_all_data() {
@@ -175,6 +197,78 @@ mod read_buffer_tests {
         assert_eq!(buffer.unread().as_ptr(), data_ptr);
         assert_eq!(buffer.unread(), &[7_u8; 1024]);
         assert!(recycled.is_some());
+    }
+
+    #[test]
+    fn compacts_consumed_prefix_before_appending_more_data() {
+        let mut buffer = ReadBuffer::with_capacity(4096);
+        let initial = (0_u8..=250).cycle().take(8192).collect::<Vec<_>>();
+        buffer.extend(&initial);
+        buffer.consume(4096);
+
+        assert_eq!(buffer.start, 0);
+        assert_eq!(buffer.unread(), &initial[4096..]);
+
+        buffer.extend(b"tail");
+        assert_eq!(&buffer.unread()[..4096], &initial[4096..]);
+        assert_eq!(&buffer.unread()[4096..], b"tail");
+
+        buffer.replace(b"replacement");
+        assert_eq!(buffer.unread(), b"replacement");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            max_shrink_iters: 10_000,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn mixed_operations_match_a_vec_model(
+            initial_capacity in 0_usize..=4096,
+            operations in prop::collection::vec(read_operation(), 1..80),
+        ) {
+            let mut buffer = ReadBuffer::with_capacity(initial_capacity);
+            let mut model = Vec::new();
+
+            for operation in &operations {
+                match operation {
+                    ReadOperation::Extend(data) => {
+                        buffer.extend(data);
+                        model.extend_from_slice(data);
+                    }
+                    ReadOperation::ExtendOwned(data) => {
+                        let recycled = buffer.extend_owned(data.clone());
+                        prop_assert!(recycled.is_some());
+                        model.extend_from_slice(data);
+                    }
+                    ReadOperation::Consume(count) => {
+                        buffer.consume(*count);
+                        let consumed = (*count).min(model.len());
+                        model.drain(..consumed);
+                    }
+                    ReadOperation::ConsumeAll => {
+                        buffer.consume_all();
+                        model.clear();
+                    }
+                    ReadOperation::Replace(data) => {
+                        buffer.replace(data);
+                        model.clone_from(data);
+                    }
+                }
+
+                prop_assert_eq!(buffer.unread(), model.as_slice());
+                prop_assert_eq!(buffer.len(), model.len());
+                prop_assert_eq!(buffer.is_empty(), model.is_empty());
+                prop_assert!(buffer.start <= buffer.bytes.len());
+                prop_assert_eq!(buffer.bytes.len() - buffer.start, model.len());
+                prop_assert!(buffer.bytes.capacity() >= buffer.bytes.len());
+                if model.is_empty() {
+                    prop_assert_eq!(buffer.start, 0);
+                }
+            }
+        }
     }
 }
 

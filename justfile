@@ -2,6 +2,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 benchmark-backend := if os() == "windows" { "winloop" } else { "uvloop" }
+python := if os() == "windows" { "python" } else { "python3" }
 
 tls-test-certs outdir="tests/fixtures/tls":
     uv run --no-project python scripts/generate_test_tls_certs.py {{outdir}}
@@ -13,7 +14,10 @@ fmt:
 clippy:
     cargo clippy --all-targets --all-features -- -D warnings
 
-test: tls-test-certs
+test-rust:
+    {{python}} scripts/run_rust_tests.py
+
+test: tls-test-certs test-rust
     uv run python -u scripts/run_python_tests.py
 
 test-frameworks:

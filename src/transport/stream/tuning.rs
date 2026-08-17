@@ -36,25 +36,33 @@ pub(super) const READ_BUFFER_POOL_LIMIT: usize = 1;
 pub(super) const TLS_WORKER_STACK_SIZE: usize = 256 * 1024;
 const DEFAULT_MAX_PENDING_TLS_HANDSHAKES: usize = 256;
 
+fn parse_positive_usize(value: Option<&str>, default: usize) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn parse_reader_spin_window(value: Option<&str>) -> Duration {
+    let micros = value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(30);
+    Duration::from_micros(micros.min(1_000))
+}
+
 pub(super) fn max_pending_tls_handshakes() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
-        std::env::var("RSLOOP_MAX_PENDING_TLS_HANDSHAKES")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_MAX_PENDING_TLS_HANDSHAKES)
+        let value = std::env::var("RSLOOP_MAX_PENDING_TLS_HANDSHAKES").ok();
+        parse_positive_usize(value.as_deref(), DEFAULT_MAX_PENDING_TLS_HANDSHAKES)
     })
 }
 
 pub(super) fn max_write_buffer_size() -> usize {
     static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
-        std::env::var("RSLOOP_MAX_WRITE_BUFFER_BYTES")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_MAX_WRITE_BUFFER_SIZE)
+        let value = std::env::var("RSLOOP_MAX_WRITE_BUFFER_BYTES").ok();
+        parse_positive_usize(value.as_deref(), DEFAULT_MAX_WRITE_BUFFER_SIZE)
     })
 }
 
@@ -65,10 +73,40 @@ pub(super) fn max_write_buffer_size() -> usize {
 pub(super) fn reader_spin_window() -> Duration {
     static WINDOW: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *WINDOW.get_or_init(|| {
-        let micros = std::env::var("RSLOOP_READER_SPIN_US")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(30);
-        Duration::from_micros(micros.min(1_000))
+        let value = std::env::var("RSLOOP_READER_SPIN_US").ok();
+        parse_reader_spin_window(value.as_deref())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{parse_positive_usize, parse_reader_spin_window};
+
+    #[test]
+    fn positive_usize_override_uses_only_valid_positive_values() {
+        assert_eq!(parse_positive_usize(None, 256), 256);
+        assert_eq!(parse_positive_usize(Some(""), 256), 256);
+        assert_eq!(parse_positive_usize(Some("invalid"), 256), 256);
+        assert_eq!(parse_positive_usize(Some("0"), 256), 256);
+        assert_eq!(parse_positive_usize(Some(" 512 "), 256), 512);
+    }
+
+    #[test]
+    fn reader_spin_window_defaults_and_clamps() {
+        assert_eq!(parse_reader_spin_window(None), Duration::from_micros(30));
+        assert_eq!(
+            parse_reader_spin_window(Some("invalid")),
+            Duration::from_micros(30)
+        );
+        assert_eq!(
+            parse_reader_spin_window(Some(" 125 ")),
+            Duration::from_micros(125)
+        );
+        assert_eq!(
+            parse_reader_spin_window(Some("1001")),
+            Duration::from_millis(1)
+        );
+    }
 }

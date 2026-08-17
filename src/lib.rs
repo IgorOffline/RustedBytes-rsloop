@@ -42,6 +42,12 @@ pub use transport::stream::{PyServer, PyStreamTransport};
 
 use pyo3::prelude::*;
 
+#[cfg(test)]
+pub(crate) fn initialize_python_for_tests() {
+    static INITIALIZE: std::sync::Once = std::sync::Once::new();
+    INITIALIZE.call_once(Python::initialize);
+}
+
 #[pymodule(gil_used = false)]
 fn _loop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

@@ -1,0 +1,60 @@
+"""Run Rust library tests against an explicitly linked Python interpreter."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def project_python(project_root: Path) -> Path:
+    relative = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
+    candidate = project_root / ".venv" / relative
+    return candidate if candidate.is_file() else Path(sys.executable)
+
+
+def python_link_config(interpreter: Path) -> tuple[str, str | None]:
+    code = """
+import json
+import sys
+import sysconfig
+
+print(json.dumps({
+    "python_home": sys.base_prefix,
+    "libdir": sysconfig.get_config_var("LIBDIR"),
+}))
+"""
+    result = subprocess.run(
+        [str(interpreter), "-c", code],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    config = json.loads(result.stdout)
+    return config["python_home"], config["libdir"]
+
+
+def main() -> int:
+    project_root = Path(__file__).resolve().parent.parent
+    interpreter = project_python(project_root)
+    python_home, libdir = python_link_config(interpreter)
+
+    env = os.environ.copy()
+    env["PYO3_PYTHON"] = str(interpreter)
+    env["PYTHONHOME"] = python_home
+    if os.name != "nt" and libdir:
+        rpath = f"-C link-arg=-Wl,-rpath,{libdir}"
+        env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} {rpath}".strip()
+
+    return subprocess.run(
+        ["cargo", "test", "--lib"],
+        cwd=project_root,
+        env=env,
+        check=False,
+    ).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

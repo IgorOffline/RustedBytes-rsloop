@@ -464,3 +464,239 @@ impl StreamTransportCore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver};
+
+    use pyo3::prelude::*;
+
+    use super::{OwnedWriteBuffer, StreamTransportCore};
+    use crate::engine::LoopCore;
+    use crate::transport::stream::builder::{
+        StreamTransportStateConfig, new_stream_transport_core, stream_transport_state_parts,
+    };
+    use crate::transport::stream::protocol::build_protocol_callbacks;
+    use crate::transport::stream::{TransportSpawnContext, WriterCommand};
+
+    #[pyclass]
+    #[derive(Default)]
+    struct RecordingProtocol {
+        events: Vec<&'static str>,
+        pause_attempts: usize,
+        panic_next_pause: bool,
+    }
+
+    #[pymethods]
+    impl RecordingProtocol {
+        fn connection_made(&self, _transport: Py<PyAny>) {}
+
+        fn connection_lost(&mut self, _error: Py<PyAny>) {
+            self.events.push("lost");
+        }
+
+        fn pause_writing(&mut self) {
+            self.pause_attempts += 1;
+            assert!(
+                !std::mem::take(&mut self.panic_next_pause),
+                "intentional pause_writing panic"
+            );
+            self.events.push("pause");
+        }
+
+        fn resume_writing(&mut self) {
+            self.events.push("resume");
+        }
+    }
+
+    fn build_test_core(
+        py: Python<'_>,
+    ) -> (
+        Arc<StreamTransportCore>,
+        Receiver<WriterCommand>,
+        Arc<LoopCore>,
+        Py<RecordingProtocol>,
+    ) {
+        let loop_core = LoopCore::new();
+        let protocol = Py::new(py, RecordingProtocol::default()).expect("recording protocol");
+        let protocol_any = protocol.clone_ref(py).into_any();
+        let callbacks =
+            build_protocol_callbacks(py, &protocol_any).expect("recording protocol callbacks");
+        let parts = stream_transport_state_parts(
+            TransportSpawnContext {
+                loop_core: Arc::clone(&loop_core),
+                loop_obj: py.None(),
+                protocol: protocol_any,
+                context: py.None(),
+                context_needs_run: false,
+            },
+            callbacks,
+            StreamTransportStateConfig {
+                io_fd: None,
+                runtime_socket_io: false,
+                extra: HashMap::new(),
+                lazy_socket_family: None,
+                reading: false,
+                writable: true,
+                can_write_eof: false,
+                close_on_write_eof: false,
+                server: None,
+            },
+        );
+        let (writer_tx, writer_rx) = mpsc::channel();
+        let core = new_stream_transport_core(parts, writer_tx, None, None);
+        loop_core.mark_runtime_thread();
+        (core, writer_rx, loop_core, protocol)
+    }
+
+    fn shutdown_test_core(
+        core: Arc<StreamTransportCore>,
+        writer_rx: Receiver<WriterCommand>,
+        loop_core: Arc<LoopCore>,
+    ) {
+        loop_core.clear_runtime_thread();
+        drop(core);
+        drop(writer_rx);
+        loop_core.close().expect("close test loop");
+    }
+
+    #[test]
+    fn write_buffer_pauses_and_resumes_only_at_watermark_crossings() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, protocol) = build_test_core(py);
+            core.set_write_buffer_limits(Some(10), Some(4))
+                .expect("valid write buffer limits");
+
+            core.queue_write(OwnedWriteBuffer::from_slice(&[0; 10]))
+                .expect("write at high water");
+            assert!(protocol.borrow(py).events.is_empty());
+
+            core.queue_write(OwnedWriteBuffer::from_slice(&[0; 1]))
+                .expect("write above high water");
+            assert_eq!(protocol.borrow(py).events, ["pause"]);
+
+            core.queue_write(OwnedWriteBuffer::from_slice(&[0; 5]))
+                .expect("write while paused");
+            assert_eq!(protocol.borrow(py).events, ["pause"]);
+
+            core.record_write_buffer_drained(11);
+            assert_eq!(core.get_write_buffer_size(), 5);
+            assert_eq!(protocol.borrow(py).events, ["pause"]);
+
+            core.record_write_buffer_drained(1);
+            assert_eq!(core.get_write_buffer_size(), 4);
+            assert_eq!(protocol.borrow(py).events, ["pause", "resume"]);
+
+            core.record_write_buffer_drained(4);
+            assert_eq!(core.get_write_buffer_size(), 0);
+            assert_eq!(protocol.borrow(py).events, ["pause", "resume"]);
+
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn changing_watermarks_reconciles_the_current_buffer_state() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, protocol) = build_test_core(py);
+            core.set_write_buffer_limits(Some(10), Some(4))
+                .expect("valid initial limits");
+            core.queue_write(OwnedWriteBuffer::from_slice(&[0; 8]))
+                .expect("buffer write");
+
+            core.set_write_buffer_limits(Some(7), Some(3))
+                .expect("lower limits");
+            assert_eq!(core.get_write_buffer_limits(), (3, 7));
+            assert_eq!(protocol.borrow(py).events, ["pause"]);
+
+            core.set_write_buffer_limits(Some(20), Some(10))
+                .expect("raise limits");
+            assert_eq!(core.get_write_buffer_limits(), (10, 20));
+            assert_eq!(protocol.borrow(py).events, ["pause", "resume"]);
+
+            core.set_write_buffer_limits(Some(20), Some(10))
+                .expect("unchanged limits");
+            assert_eq!(protocol.borrow(py).events, ["pause", "resume"]);
+
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn invalid_limits_and_connection_loss_leave_write_state_consistent() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, protocol) = build_test_core(py);
+            core.set_write_buffer_limits(Some(10), Some(4))
+                .expect("valid write buffer limits");
+
+            let error = core
+                .set_write_buffer_limits(Some(3), Some(4))
+                .expect_err("low water above high water should fail");
+            assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert_eq!(core.get_write_buffer_limits(), (4, 10));
+
+            core.queue_write(OwnedWriteBuffer::from_slice(&[0; 11]))
+                .expect("write above high water");
+            assert_eq!(protocol.borrow(py).events, ["pause"]);
+            assert_eq!(core.get_write_buffer_size(), 11);
+
+            core.connection_lost_with_py(py, None)
+                .expect("connection loss callback");
+            assert_eq!(core.get_write_buffer_size(), 0);
+            assert_eq!(protocol.borrow(py).events, ["pause", "lost"]);
+            assert!(core.is_closing());
+            assert!(
+                !core
+                    .state
+                    .lock()
+                    .expect("transport state")
+                    .write_buffer
+                    .protocol_paused
+            );
+
+            core.record_write_buffer_drained(11);
+            assert_eq!(protocol.borrow(py).events, ["pause", "lost"]);
+
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+
+    #[test]
+    fn panicking_protocol_callback_leaves_transport_locks_unpoisoned() {
+        crate::initialize_python_for_tests();
+        Python::attach(|py| {
+            let (core, writer_rx, loop_core, protocol) = build_test_core(py);
+            protocol.borrow_mut(py).panic_next_pause = true;
+            core.set_write_buffer_limits(Some(10), Some(4))
+                .expect("valid write buffer limits");
+
+            let callback_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                core.queue_write(OwnedWriteBuffer::from_slice(&[0; 11]))
+                    .expect("write crossing high water");
+            }));
+
+            assert!(callback_panic.is_err());
+            assert!(!core.state.is_poisoned());
+            assert!(!loop_core.state.is_poisoned());
+            assert_eq!(core.get_write_buffer_size(), 11);
+            assert_eq!(protocol.borrow(py).pause_attempts, 1);
+            assert!(protocol.borrow(py).events.is_empty());
+
+            core.record_write_buffer_drained(11);
+            core.queue_write(OwnedWriteBuffer::from_slice(&[0; 11]))
+                .expect("write after callback panic");
+
+            assert!(!core.state.is_poisoned());
+            assert_eq!(protocol.borrow(py).pause_attempts, 2);
+            assert_eq!(protocol.borrow(py).events, ["resume", "pause"]);
+
+            core.clear_write_buffer(false);
+            shutdown_test_core(core, writer_rx, loop_core);
+        });
+    }
+}

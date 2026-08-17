@@ -209,3 +209,28 @@ pub(super) fn run_process_waiter(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::process_exit_code;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_exit_code_preserves_exit_status_and_negates_signals() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert_eq!(process_exit_code(ExitStatusExt::from_raw(23 << 8)), 23);
+        assert_eq!(
+            process_exit_code(ExitStatusExt::from_raw(libc::SIGTERM)),
+            -libc::SIGTERM
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_exit_code_preserves_exit_status() {
+        use std::os::windows::process::ExitStatusExt;
+
+        assert_eq!(process_exit_code(ExitStatusExt::from_raw(23)), 23);
+    }
+}

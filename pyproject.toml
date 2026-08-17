@@ -41,7 +41,7 @@ Issues = "https://github.com/RustedBytes/rsloop/issues"
 [tool.maturin]
 python-source = "python"
 module-name = "rsloop._loop"
-features = ["pyo3/extension-module"]
+features = ["extension-module"]
 include = ["python/rsloop/_loop.pyi"]
 
 [dependency-groups]

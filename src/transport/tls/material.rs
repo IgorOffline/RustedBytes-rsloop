@@ -153,3 +153,57 @@ fn io_err_to_py(err: io::Error) -> PyErr {
 pub(super) fn to_py_tls_err(err: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use pyo3::Python;
+
+    use super::{load_pem_identity, load_private_key};
+
+    const CERTFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/cert.pem");
+    const KEYFILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/key.pem");
+
+    #[test]
+    fn loads_checked_in_certificate_chain_and_private_key() {
+        let identity = load_pem_identity(CERTFILE, KEYFILE, None)
+            .expect("fixture identity should parse")
+            .expect("fixture identity should be present");
+
+        assert!(!identity.0.is_empty());
+        assert!(!identity.1.secret_der().is_empty());
+    }
+
+    #[test]
+    fn rejects_password_protected_key_configuration() {
+        crate::initialize_python_for_tests();
+        let result = load_pem_identity(CERTFILE, KEYFILE, Some(b"secret"));
+        let Err(error) = result else {
+            panic!("password-protected identity should fail");
+        };
+
+        Python::attach(|py| {
+            assert!(
+                error
+                    .value(py)
+                    .to_string()
+                    .contains("encrypted private keys are not supported")
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_data_without_a_supported_private_key() {
+        crate::initialize_python_for_tests();
+        let result = load_private_key(b"not a PEM private key".to_vec());
+        let Err(error) = result else {
+            panic!("invalid private key data should fail");
+        };
+
+        Python::attach(|py| {
+            assert_eq!(
+                error.value(py).to_string(),
+                "no supported private key found"
+            );
+        });
+    }
+}
