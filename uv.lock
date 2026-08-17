@@ -2255,6 +2255,7 @@ source = { editable = "." }
 [package.dev-dependencies]
 dev = [
     { name = "aiohttp" },
+    { name = "anyio" },
     { name = "daphne" },
     { name = "django", version = "5.2.17", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "django", version = "6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -2279,6 +2280,7 @@ dev = [
 ]
 test = [
     { name = "aiohttp" },
+    { name = "anyio" },
     { name = "daphne" },
     { name = "django", version = "5.2.17", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "django", version = "6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -2301,6 +2303,7 @@ test = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aiohttp", specifier = ">=3.14.3" },
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "daphne", specifier = ">=4.2.3" },
     { name = "django", specifier = ">=5.2.17" },
     { name = "falcon", specifier = ">=4.1.0" },
@@ -2324,6 +2327,7 @@ dev = [
 ]
 test = [
     { name = "aiohttp", specifier = ">=3.14.3" },
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "daphne", specifier = ">=4.2.3" },
     { name = "django", specifier = ">=5.2.17" },
     { name = "falcon", specifier = ">=4.1.0" },

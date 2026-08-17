@@ -35,6 +35,11 @@ test-frameworks:
     uv run --with falcon --with uvicorn python tests/packages/falcon_test.py
     uv run --with quart --with hypercorn python tests/packages/quart_test.py
     uv run --with 'faststream[nats]' python tests/packages/faststream_test.py
+    uv run --with anyio python tests/packages/anyio_test.py
+
+# Just the AnyIO checks, which is what CI runs as its own job.
+test-anyio:
+    uv run --with anyio python tests/packages/anyio_test.py
 
 bench-real-world:
     uv run --with {{benchmark-backend}} python benches/workload_matrix.py

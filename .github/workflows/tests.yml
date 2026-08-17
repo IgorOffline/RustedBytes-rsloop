@@ -106,6 +106,62 @@ jobs:
           uv sync --group dev --no-install-project
           uv run --no-sync pyright
 
+  anyio-test:
+    # AnyIO drives the loop through APIs the other package tests never touch —
+    # subprocess_exec with the full Popen keyword set, socket creation,
+    # run_in_executor, cancel scopes. Issue #68 was a break on that path that
+    # only AnyIO noticed, so it gets its own job rather than waiting for a
+    # downstream bug report.
+    name: anyio
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          python-version: "3.13"
+          cache-suffix: anyio
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - name: Build rsloop and run the AnyIO checks
+        env:
+          RSLOOP_BUILD_MODE: ${{ inputs.build_mode || 'debug' }}
+        run: |
+          uv run --no-project --python 3.13 --with maturin --with anyio python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          maturin = ["maturin", "develop"]
+          if os.environ.get("RSLOOP_BUILD_MODE") == "release":
+              maturin.append("--release")
+          # maturin installs into the interpreter uv built for this run, which is
+          # the same one that then imports rsloop below.
+          subprocess.run(maturin, check=True)
+          subprocess.run(
+              [sys.executable, "-u", "tests/packages/anyio_test.py"], check=True
+          )
+          PY
+
   test-matrix:
     name: test matrix
     runs-on: ubuntu-latest

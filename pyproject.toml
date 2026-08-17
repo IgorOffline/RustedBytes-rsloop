@@ -56,6 +56,7 @@ dev = [
 # Dependencies for the library/framework tests in tests/packages
 test = [
     "aiohttp>=3.14.3",
+    "anyio>=4.14.2",
     "daphne>=4.2.3",
     "django>=5.2.17",
     "falcon>=4.1.0",
