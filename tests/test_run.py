@@ -637,7 +637,9 @@ else:
 
                 with self.assertRaises(ValueError) as caught:
                     rsloop.run(main())
-                self.assertIn("only supported on Windows platforms", str(caught.exception))
+                self.assertIn(
+                    "only supported on Windows platforms", str(caught.exception)
+                )
 
     def test_subprocess_shell_round_trip(self) -> None:
         async def main() -> dict[str, object]:
