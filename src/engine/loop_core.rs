@@ -123,6 +123,12 @@ fn wake_spin_window() -> Duration {
 // completions are still serviced under sustained same-connection traffic.
 const MAX_CONSECUTIVE_SPINS: u32 = 64;
 
+// Parks to skip spinning for after a spin window elapsed without catching a
+// wake. Long enough that a loop whose wakes never land inside the window stops
+// paying for it, short enough that the loop re-probes often enough to recover
+// the low-latency path as soon as traffic turns interactive again.
+const SPIN_MISS_COOLDOWN_PARKS: u32 = 8;
+
 impl Future for WaitForWake {
     type Output = ();
 
@@ -476,6 +482,7 @@ impl LoopCore {
         let mut ready_batch = VecDeque::new();
         let spin_window = wake_spin_window();
         let mut consecutive_spins: u32 = 0;
+        let mut spin_cooldown: u32 = 0;
         let run_result = loop {
             self.set_ready_drain_active(true);
 
@@ -663,7 +670,17 @@ impl LoopCore {
             // bound without bypassing PyO3's attachment bookkeeping.
             py.detach(|| {
                 let mut caught = false;
-                if !spin_window.is_zero() {
+                // A spin that times out is pure loss: the loop thread burns a
+                // whole window and then parks anyway. That is cheap when the
+                // loop is otherwise idle, but this thread is the bottleneck
+                // whenever the protocol does real work per message (websockets,
+                // ASGI), where one wasted window costs more than a callback.
+                // So back off after a miss and re-probe once the cooldown ends,
+                // which keeps the win on quiet ping-pong loops — there spins
+                // essentially always catch — without paying for it under load.
+                if spin_window.is_zero() || spin_cooldown > 0 {
+                    spin_cooldown = spin_cooldown.saturating_sub(1);
+                } else {
                     let spin_deadline = Instant::now() + spin_window;
                     'spin: loop {
                         for _ in 0..64 {
@@ -674,6 +691,7 @@ impl LoopCore {
                             std::hint::spin_loop();
                         }
                         if Instant::now() >= spin_deadline {
+                            spin_cooldown = SPIN_MISS_COOLDOWN_PARKS;
                             break 'spin;
                         }
                     }

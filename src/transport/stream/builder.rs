@@ -131,11 +131,27 @@ pub(super) fn new_stream_transport_core(
 ) -> Arc<StreamTransportCore> {
     let has_text_encoding = parts.state.extra.contains_key("text_encoding");
     let server_side = parts.state.server.is_some();
-    let coalesce_small_server_writes = server_side
-        && matches!(
-            &parts.state.callbacks.stream_reader_fast_path,
-            Some(StreamReaderFastPath::Native { .. })
-        );
+    let native_stream_reader = matches!(
+        &parts.state.callbacks.stream_reader_fast_path,
+        Some(StreamReaderFastPath::Native { .. })
+    );
+    // Batching modest writes until the ready drain ends pays for two reasons.
+    // The obvious one is joining a protocol header with its body into a single
+    // syscall. The larger one is that socket readers live on the runtime
+    // thread: a write to a loopback peer has to wake that thread out of
+    // `kevent`, which costs the writing loop thread about a microsecond of its
+    // own CPU. Writes released back-to-back at the end of a turn only pay that
+    // once, whereas writes spread across a turn let the reader fall back asleep
+    // between them and charge it again for every message.
+    //
+    // That trade needs the loop thread to be the scarce resource, which is the
+    // case for callback protocols (websockets, aiohttp, ASGI servers), where
+    // each message costs real Python work. Native fast streams are the opposite
+    // — their per-message work is a few microseconds of Rust, so their peer
+    // reader is usually still awake and the staging copy would be pure
+    // overhead. Keep those direct except for server replies, which is where
+    // header/body joining applies.
+    let coalesce_small_writes = server_side || !native_stream_reader;
     let reading = parts.state.reading;
     Arc::new(StreamTransportCore {
         loop_core: parts.loop_core,
@@ -170,7 +186,7 @@ pub(super) fn new_stream_transport_core(
         has_text_encoding,
         #[cfg(windows)]
         server_side,
-        coalesce_small_server_writes,
+        coalesce_small_writes,
     })
 }
 

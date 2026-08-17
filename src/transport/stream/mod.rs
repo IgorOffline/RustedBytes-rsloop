@@ -201,7 +201,7 @@ pub struct StreamTransportCore {
     has_text_encoding: bool,
     #[cfg(windows)]
     server_side: bool,
-    coalesce_small_server_writes: bool,
+    coalesce_small_writes: bool,
 }
 
 struct ServerState {
