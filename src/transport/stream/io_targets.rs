@@ -50,6 +50,14 @@ impl TaskedDirectWriter {
             Self::Unix(stream) => shutdown_unix_stream(stream, Shutdown::Both),
         }
     }
+
+    pub(super) fn shutdown_write(&self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => shutdown_tcp_stream(stream, Shutdown::Write),
+            #[cfg(unix)]
+            Self::Unix(stream) => shutdown_unix_stream(stream, Shutdown::Write),
+        }
+    }
 }
 
 pub enum ReaderTarget {

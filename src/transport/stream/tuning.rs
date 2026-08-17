@@ -15,11 +15,13 @@ pub(super) const MAX_READ_EVENTS_PER_DRAIN: usize = 16;
 pub(super) const MAX_READ_BYTES_PER_DRAIN: usize = 128 * 1024;
 pub(super) const PENDING_READ_HIGH_WATER: usize = 1024 * 1024;
 pub(super) const PENDING_READ_LOW_WATER: usize = PENDING_READ_HIGH_WATER / 4;
-// Servers commonly emit a small protocol header followed immediately by a
-// body. Defer only that header-sized first write for one loop turn so adjacent
-// writes share a syscall; keep tiny control frames and larger payloads direct.
+// Batch ordinary server replies for one loop turn. Besides joining a protocol
+// header with its body, this lets the loop finish a group of ready connection
+// callbacks before their peer readers wake it again. Tie the upper bound to a
+// normal socket-read block rather than a header-size guess: complete framed
+// messages are often larger than their header, while bulk writes remain direct.
 pub(super) const SMALL_WRITE_COALESCE_MIN_BYTES: usize = 64;
-pub(super) const SMALL_WRITE_COALESCE_MAX_BYTES: usize = 512;
+pub(super) const SMALL_WRITE_COALESCE_MAX_BYTES: usize = STREAM_READ_BUFFER_SIZE;
 pub(super) const BLOCKING_POLL_INTERVAL_MS: i32 = 50;
 pub(super) const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 // Keep the per-connection allocation modest. Large reads are delivered in

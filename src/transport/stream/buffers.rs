@@ -1,5 +1,6 @@
 //! Owned buffers shared by stream reader and writer paths.
 
+use std::ops::{Deref, DerefMut};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,58 @@ pub(super) struct OwnedWriteBuffer {
     bytes: Vec<u8>,
     offset: usize,
     pool: Option<Arc<WriteBufferPool>>,
+}
+
+/// A socket-read allocation whose pool slot follows the bytes into the
+/// consumer.  Native stream readers can retain this buffer directly instead
+/// of copying it and still return the allocation to the bounded transport
+/// pool when they replace or drop it.
+pub(super) struct OwnedReadBuffer {
+    bytes: Vec<u8>,
+    pool: Option<Arc<ReadBufferPool>>,
+}
+
+impl OwnedReadBuffer {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+            pool: None,
+        }
+    }
+
+    pub(super) fn from_pooled(bytes: Vec<u8>, pool: &Arc<ReadBufferPool>) -> Self {
+        Self {
+            bytes,
+            pool: Some(Arc::clone(pool)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_vec(bytes: Vec<u8>) -> Self {
+        Self { bytes, pool: None }
+    }
+}
+
+impl Deref for OwnedReadBuffer {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl DerefMut for OwnedReadBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes
+    }
+}
+
+impl Drop for OwnedReadBuffer {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            pool.release(std::mem::take(&mut self.bytes));
+        }
+    }
 }
 
 pub(super) struct PendingReadBuffer<'a> {
@@ -327,8 +380,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        MAX_STREAM_READ_BUFFER_SIZE, OwnedWriteBuffer, PendingReadBuffer, READ_BUFFER_POOL_LIMIT,
-        ReadBufferPool, WRITE_BUFFER_POOL_LIMIT, WriteBufferPool,
+        MAX_STREAM_READ_BUFFER_SIZE, OwnedReadBuffer, OwnedWriteBuffer, PendingReadBuffer,
+        READ_BUFFER_POOL_LIMIT, ReadBufferPool, WRITE_BUFFER_POOL_LIMIT, WriteBufferPool,
     };
 
     #[test]
@@ -449,6 +502,22 @@ mod tests {
         pool.release(held.into_iter().next().expect("held buffer"));
 
         assert!(pool.has_available());
+    }
+
+    #[test]
+    fn owned_read_buffer_returns_its_allocation_to_the_pool() {
+        let pool = Arc::new(ReadBufferPool::new());
+        let mut bytes = pool.try_acquire(128).expect("pool slot");
+        bytes.extend_from_slice(b"framed message");
+        let pointer = bytes.as_ptr();
+
+        let owned = OwnedReadBuffer::from_pooled(bytes, &pool);
+        assert_eq!(owned.as_slice(), b"framed message");
+        drop(owned);
+
+        let reused = pool.try_acquire(64).expect("returned pool slot");
+        assert_eq!(reused.as_ptr(), pointer);
+        pool.release(reused);
     }
 
     #[test]

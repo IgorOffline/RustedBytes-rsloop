@@ -110,7 +110,11 @@ impl PyStreamTransport {
             if let Some(writer) = &self.core.direct_writer {
                 let writer = writer.lock().expect("poisoned direct tasked writer");
                 if let Some(writer) = writer.as_ref() {
-                    let _ = writer.shutdown_close();
+                    // `close()` is graceful: stop producing bytes, then let
+                    // the kernel deliver everything already accepted into its
+                    // send buffer. `shutdown(Both)` can discard that tail on
+                    // some platforms and is reserved for `abort()`.
+                    let _ = writer.shutdown_write();
                 }
             }
             let _ = self.core.writer_tx.send(WriterCommand::Stop);

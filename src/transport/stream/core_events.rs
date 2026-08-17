@@ -276,10 +276,9 @@ impl StreamTransportCore {
                         drained_events += 1;
                         drained_bytes += data.len();
                         if let Some(fast_path) = fast_path.as_ref() {
-                            match fast_path.feed_data(py, &data) {
-                                Ok(()) => self.read_buffer_pool.release(data),
+                            match fast_path.feed_owned_data(py, data, &self.read_buffer_pool) {
+                                Ok(()) => {}
                                 Err(err) => {
-                                    self.read_buffer_pool.release(data);
                                     let _ = self.report_error_with_py(
                                         py,
                                         err,

@@ -327,6 +327,47 @@ class CompatibilityTests(unittest.TestCase):
 
         self.assertEqual(rsloop.run(main()), first + second)
 
+    def test_close_preserves_kernel_buffered_bulk_tail(self) -> None:
+        chunk = b"x" * (64 * 1024)
+        chunk_count = 32
+
+        async def main() -> list[bytes]:
+            async def handle(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                try:
+                    await reader.readexactly(1)
+                    for _ in range(chunk_count):
+                        writer.write(chunk)
+                        await writer.drain()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+
+            server = await asyncio.start_server(handle, "127.0.0.1", 0)
+            try:
+                host, port = server.sockets[0].getsockname()[:2]
+
+                async def receive() -> bytes:
+                    reader, writer = await asyncio.open_connection(host, port)
+                    try:
+                        writer.write(b"!")
+                        await writer.drain()
+                        data = await reader.readexactly(len(chunk) * chunk_count)
+                        self.assertEqual(await reader.read(), b"")
+                        return data
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+
+                return await asyncio.gather(*(receive() for _ in range(4)))
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        received = rsloop.run(main())
+        self.assertEqual(received, [chunk * chunk_count] * 4)
+
     def test_writelines_coalesces_bytes_like_items(self) -> None:
         async def main() -> bytes:
             async def handle(

@@ -106,7 +106,11 @@ pub(super) fn handle_stream_writer_command(
             write_stream_data_batch(core, writer, writer_rx, data, pending_command)
         }
         WriterCommand::WriteEof => handle_stream_write_eof(core, writer),
-        WriterCommand::Close | WriterCommand::Abort => {
+        WriterCommand::Close => {
+            report_writer_close_result(core, writer.shutdown_write());
+            false
+        }
+        WriterCommand::Abort => {
             report_writer_close_result(core, writer.shutdown_close());
             false
         }

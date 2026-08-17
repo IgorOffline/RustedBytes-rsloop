@@ -7,6 +7,7 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyTuple};
 use pyo3_async_runtimes::TaskLocals;
 
+use super::buffers::{OwnedReadBuffer, ReadBufferPool};
 use super::{PyStreamTransport, task_locals_for_loop};
 use crate::bindings::PyLoop;
 use crate::python_names;
@@ -58,7 +59,7 @@ fn loop_create_future(py: Python<'_>, loop_obj: &Py<PyAny>) -> PyResult<Py<PyAny
 
 /// Sliding buffer that delays compaction and releases unusually large bursts.
 struct ReadBuffer {
-    bytes: Vec<u8>,
+    bytes: OwnedReadBuffer,
     start: usize,
     baseline_capacity: usize,
     max_retained_capacity: usize,
@@ -67,7 +68,7 @@ struct ReadBuffer {
 impl ReadBuffer {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            bytes: Vec::with_capacity(capacity),
+            bytes: OwnedReadBuffer::with_capacity(capacity),
             start: 0,
             baseline_capacity: capacity,
             max_retained_capacity: super::tuning::MAX_STREAM_READ_BUFFER_SIZE,
@@ -98,8 +99,7 @@ impl ReadBuffer {
         self.bytes.extend_from_slice(data);
     }
 
-    #[cfg(test)]
-    fn extend_owned(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {
+    fn extend_owned(&mut self, data: OwnedReadBuffer) -> Option<OwnedReadBuffer> {
         if data.is_empty() {
             return Some(data);
         }
@@ -136,7 +136,7 @@ impl ReadBuffer {
         }
         if self.start == self.bytes.len() {
             if self.bytes.capacity() > self.max_retained_capacity {
-                self.bytes = Vec::with_capacity(self.baseline_capacity);
+                self.bytes = OwnedReadBuffer::with_capacity(self.baseline_capacity);
             } else {
                 self.bytes.clear();
             }
@@ -144,8 +144,9 @@ impl ReadBuffer {
             return;
         }
         if self.start >= 4096 && self.start * 2 >= self.bytes.len() {
+            let remaining = self.bytes.len() - self.start;
             self.bytes.copy_within(self.start.., 0);
-            self.bytes.truncate(self.bytes.len() - self.start);
+            self.bytes.truncate(remaining);
             self.start = 0;
         }
     }
@@ -155,7 +156,7 @@ impl ReadBuffer {
 mod read_buffer_tests {
     use proptest::prelude::*;
 
-    use super::ReadBuffer;
+    use super::{OwnedReadBuffer, ReadBuffer};
 
     #[derive(Clone, Debug)]
     enum ReadOperation {
@@ -195,7 +196,7 @@ mod read_buffer_tests {
         let data = vec![7_u8; 1024];
         let data_ptr = data.as_ptr();
 
-        let recycled = buffer.extend_owned(data);
+        let recycled = buffer.extend_owned(OwnedReadBuffer::from_vec(data));
 
         assert_eq!(buffer.unread().as_ptr(), data_ptr);
         assert_eq!(buffer.unread(), &[7_u8; 1024]);
@@ -242,7 +243,7 @@ mod read_buffer_tests {
                         model.extend_from_slice(data);
                     }
                     ReadOperation::ExtendOwned(data) => {
-                        let recycled = buffer.extend_owned(data.clone());
+                        let recycled = buffer.extend_owned(OwnedReadBuffer::from_vec(data.clone()));
                         prop_assert!(recycled.is_some());
                         model.extend_from_slice(data);
                     }
@@ -627,6 +628,21 @@ impl PyFastStreamReader {
             return Err(PyValueError::new_err("feed_data after feed_eof"));
         }
         self.buffer.extend(data);
+        self.maybe_complete_waiter(py)?;
+        self.maybe_pause_transport(py)
+    }
+
+    pub(super) fn feed_owned_data_internal(
+        &mut self,
+        py: Python<'_>,
+        data: Vec<u8>,
+        pool: &std::sync::Arc<ReadBufferPool>,
+    ) -> PyResult<()> {
+        let data = OwnedReadBuffer::from_pooled(data, pool);
+        if self.eof {
+            return Err(PyValueError::new_err("feed_data after feed_eof"));
+        }
+        let _recycled = self.buffer.extend_owned(data);
         self.maybe_complete_waiter(py)?;
         self.maybe_pause_transport(py)
     }

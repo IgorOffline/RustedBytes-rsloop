@@ -4,10 +4,11 @@
 //! fit in the kernel buffer and never need a writer thread. What does not fit
 //! is queued to the writer worker, which is only started at that point.
 //!
-//! Server responses that begin with a small header get staged for one loop turn
-//! (`SMALL_WRITE_COALESCE_*`) so the header and body share a syscall. Buffered
-//! bytes are tracked against the high/low water marks and translated into
-//! `pause_writing`/`resume_writing` on the protocol.
+//! Ordinary server responses get staged for one loop turn
+//! (`SMALL_WRITE_COALESCE_*`) so a header and body share a syscall and a batch
+//! of ready connections can finish their callbacks before waking peer readers.
+//! Buffered bytes are tracked against the high/low water marks and translated
+//! into `pause_writing`/`resume_writing` on the protocol.
 
 use std::io::{self, Write as _};
 use std::sync::Arc;
@@ -34,6 +35,11 @@ use super::{
 };
 use crate::engine::{LoopCommand, LoopTransportCommand};
 use crate::fd_ops;
+
+#[inline]
+fn is_server_write_batch_candidate(len: usize) -> bool {
+    len > SMALL_WRITE_COALESCE_MIN_BYTES && len <= SMALL_WRITE_COALESCE_MAX_BYTES
+}
 
 impl StreamTransportCore {
     #[inline]
@@ -239,8 +245,7 @@ impl StreamTransportCore {
         if self.direct_writer.is_some() && !self.write_backpressure_active() {
             if self.direct_write_scheduled.load(Ordering::Acquire)
                 || (self.coalesce_small_server_writes
-                    && data.len() > SMALL_WRITE_COALESCE_MIN_BYTES
-                    && data.len() <= SMALL_WRITE_COALESCE_MAX_BYTES)
+                    && is_server_write_batch_candidate(data.len()))
             {
                 return self.stage_direct_write(data);
             }
@@ -300,8 +305,7 @@ impl StreamTransportCore {
         if self.direct_writer.is_some() && !self.write_backpressure_active() {
             if self.direct_write_scheduled.load(Ordering::Acquire)
                 || (self.coalesce_small_server_writes
-                    && data.remaining().len() > SMALL_WRITE_COALESCE_MIN_BYTES
-                    && data.remaining().len() <= SMALL_WRITE_COALESCE_MAX_BYTES)
+                    && is_server_write_batch_candidate(data.remaining().len()))
             {
                 return self.stage_direct_write(data.remaining());
             }
@@ -529,9 +533,29 @@ mod tests {
 
     use pyo3::prelude::*;
 
-    use super::OwnedWriteBuffer;
+    use super::{OwnedWriteBuffer, is_server_write_batch_candidate};
     use crate::transport::stream::test_support::{build_test_core, shutdown_test_core};
-    use crate::transport::stream::tuning::max_write_buffer_size;
+    use crate::transport::stream::tuning::{
+        SMALL_WRITE_COALESCE_MAX_BYTES, SMALL_WRITE_COALESCE_MIN_BYTES, STREAM_READ_BUFFER_SIZE,
+        max_write_buffer_size,
+    };
+
+    #[test]
+    fn server_write_batch_range_tracks_the_normal_read_block() {
+        assert_eq!(SMALL_WRITE_COALESCE_MAX_BYTES, STREAM_READ_BUFFER_SIZE);
+        assert!(!is_server_write_batch_candidate(
+            SMALL_WRITE_COALESCE_MIN_BYTES
+        ));
+        assert!(is_server_write_batch_candidate(
+            SMALL_WRITE_COALESCE_MIN_BYTES + 1
+        ));
+        assert!(is_server_write_batch_candidate(
+            SMALL_WRITE_COALESCE_MAX_BYTES
+        ));
+        assert!(!is_server_write_batch_candidate(
+            SMALL_WRITE_COALESCE_MAX_BYTES + 1
+        ));
+    }
 
     #[test]
     fn write_buffer_pauses_and_resumes_only_at_watermark_crossings() {

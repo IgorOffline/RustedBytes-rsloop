@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyByteArrayMethods};
 
 use super::PyStreamTransport;
+use super::buffers::ReadBufferPool;
 use super::fast::{PyFastStreamProtocol, PyFastStreamReader};
 use crate::python_names;
 
@@ -159,6 +160,24 @@ impl StreamReaderFastPath {
                 }
 
                 Ok(())
+            }
+        }
+    }
+
+    pub(super) fn feed_owned_data(
+        &self,
+        py: Python<'_>,
+        data: Vec<u8>,
+        pool: &std::sync::Arc<ReadBufferPool>,
+    ) -> PyResult<()> {
+        match self {
+            Self::Native { reader, .. } => reader
+                .borrow_mut(py)
+                .feed_owned_data_internal(py, data, pool),
+            Self::Generic { .. } => {
+                let result = self.feed_data(py, &data);
+                pool.release(data);
+                result
             }
         }
     }
