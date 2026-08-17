@@ -52,7 +52,8 @@ Important files:
 - `engine/callbacks.rs`: callback handles and scheduling helpers
 - `transport/stream/mod.rs`: the transport and server core types every stream module shares
 - `transport/stream/`: one module per concern (`socket_transport.rs`, `tls_transport.rs`, `accept.rs`, `reader.rs`, `writer.rs`, `fast.rs`, and so on)
-- `transport/process/`: subprocess and pipe transport support
+- `transport/process/mod.rs`: the subprocess core type and the messages its threads exchange
+- `transport/process/`: one module per concern (`spawn.rs`, `worker.rs`, `core_protocol.rs`, and so on)
 - `transport/tls/`: TLS configuration and certificate material
 - `platform/fd/`: lower-level cross-platform descriptor work
 - `context.rs`: running-loop and context management helpers
