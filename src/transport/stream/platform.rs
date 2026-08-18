@@ -35,7 +35,7 @@ pub(super) fn tcp_stream_raw_fd(stream: &TcpStream) -> fd_ops::RawFd {
 #[cfg(windows)]
 #[inline]
 pub(super) fn tcp_stream_raw_fd(stream: &TcpStream) -> fd_ops::RawFd {
-    stream.as_raw_socket() as fd_ops::RawFd
+    stream.as_raw_socket().cast_signed()
 }
 
 #[cfg(unix)]
@@ -45,7 +45,7 @@ pub(super) fn tcp_listener_raw_fd(listener: &TcpListener) -> fd_ops::RawFd {
 
 #[cfg(windows)]
 pub(super) fn tcp_listener_raw_fd(listener: &TcpListener) -> fd_ops::RawFd {
-    listener.as_raw_socket() as fd_ops::RawFd
+    listener.as_raw_socket().cast_signed()
 }
 
 #[cfg(unix)]

@@ -3,6 +3,8 @@
 //! It prepares `ReadyItem`s but leaves Python callback execution to the loop
 //! thread. Direct stream I/O can instead run on the loop thread's own reactor.
 
+#[cfg(not(unix))]
+use std::collections::HashSet;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -35,7 +37,10 @@ struct RuntimeDispatcher {
     timers: BinaryHeap<TimerEntry>,
     next_timer_id: u64,
     active_run: Option<ActiveRun>,
+    #[cfg(unix)]
     signal_tasks: HashMap<i32, SignalWatcher>,
+    #[cfg(not(unix))]
+    signal_tasks: HashSet<i32>,
     reader_tasks: HashMap<fd_ops::RawFd, WatchTask>,
     writer_tasks: HashMap<fd_ops::RawFd, WatchTask>,
     accept_tasks: HashMap<fd_ops::RawFd, WatchTask>,
@@ -52,9 +57,6 @@ struct SignalWatcher {
     handle: SignalHandle,
     join: thread::JoinHandle<()>,
 }
-
-#[cfg(not(unix))]
-struct SignalWatcher;
 
 /// A watcher may be an older helper thread or a native `vibeio` task.
 enum WatchTask {
@@ -125,7 +127,10 @@ pub fn run_runtime_thread(core: Arc<LoopCore>, command_rx: Receiver<LoopCommand>
         timers: BinaryHeap::new(),
         next_timer_id: 0,
         active_run: None,
+        #[cfg(unix)]
         signal_tasks: HashMap::new(),
+        #[cfg(not(unix))]
+        signal_tasks: HashSet::new(),
         reader_tasks: HashMap::new(),
         writer_tasks: HashMap::new(),
         accept_tasks: HashMap::new(),

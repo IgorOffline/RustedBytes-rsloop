@@ -12,7 +12,7 @@ fmt:
     cargo fmt --all
 
 clippy:
-    cargo clippy --all-targets --all-features -- -D warnings
+    uv run cargo clippy --all-targets --all-features -- -D warnings
 
 test-rust:
     uv run python scripts/run_rust_tests.py

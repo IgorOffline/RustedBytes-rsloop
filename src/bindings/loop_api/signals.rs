@@ -29,7 +29,7 @@ pub(super) fn add_signal_handler(
     #[cfg(not(unix))]
     {
         let _ = (slf, py, sig, callback, args);
-        return Err(PyLoop::not_implemented("add_signal_handler"));
+        Err(PyLoop::not_implemented("add_signal_handler"))
     }
     #[cfg(unix)]
     {

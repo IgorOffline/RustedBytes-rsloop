@@ -21,6 +21,8 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 #[cfg(windows)]
 use std::os::windows::io::IntoRawSocket;
+#[cfg(windows)]
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -287,7 +289,6 @@ pub(super) async fn run_tcp_accept_task(server: Arc<ServerCore>, listener: StdTc
     #[cfg(windows)]
     {
         run_windows_tcp_accept_pool(server, listener).await;
-        return;
     }
 
     #[cfg(not(windows))]
@@ -313,7 +314,7 @@ pub(super) async fn run_windows_tcp_accept_pool(server: Arc<ServerCore>, listene
         .saturating_mul(2)
         .clamp(4, 32);
     let listener = match VibeTcpListener::from_std(listener) {
-        Ok(listener) => Arc::new(listener),
+        Ok(listener) => Rc::new(listener),
         Err(err) => {
             report_server_io_error(&server, err, "TCP server accept failed");
             return;
@@ -323,7 +324,7 @@ pub(super) async fn run_windows_tcp_accept_pool(server: Arc<ServerCore>, listene
         .map(|_| {
             vibeio::spawn(run_windows_tcp_accept_lane(
                 Arc::clone(&server),
-                Arc::clone(&listener),
+                Rc::clone(&listener),
             ))
         })
         .collect();
@@ -334,7 +335,7 @@ pub(super) async fn run_windows_tcp_accept_pool(server: Arc<ServerCore>, listene
 #[cfg(windows)]
 pub(super) async fn run_windows_tcp_accept_lane(
     server: Arc<ServerCore>,
-    listener: Arc<VibeTcpListener>,
+    listener: Rc<VibeTcpListener>,
 ) {
     profiling::scope!("stream.run_tcp_accept_task");
     loop {

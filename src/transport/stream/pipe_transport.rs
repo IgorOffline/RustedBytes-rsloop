@@ -151,5 +151,5 @@ pub(super) fn pipe_file_from_obj(py: Python<'_>, pipe_obj: &Py<PyAny>) -> PyResu
     let fd = fd_ops::fileobj_to_fd(py, pipe_obj.bind(py))?;
     let handle = fd_ops::duplicate_handle_from_fd(fd)
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-    Ok(from_owned_raw_handle(handle as _))
+    Ok(from_owned_raw_handle(handle.cast()))
 }

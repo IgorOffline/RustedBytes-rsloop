@@ -268,6 +268,28 @@ pub fn spawn_process_transport(
     Ok(transport)
 }
 
+#[cfg(windows)]
+pub(super) fn make_python_pipe_file_from_handle(
+    py: Python<'_>,
+    handle: std::os::windows::io::RawHandle,
+    mode: &str,
+) -> PyResult<Py<PyAny>> {
+    let duplicated =
+        fd_ops::duplicate_handle(handle).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    let msvcrt = py.import("msvcrt")?;
+    let os = py.import("os")?;
+    let flags = if mode.starts_with('r') {
+        libc::O_RDONLY
+    } else {
+        libc::O_WRONLY
+    } | libc::O_BINARY;
+    let fd = msvcrt
+        .getattr("open_osfhandle")?
+        .call1((duplicated as isize, flags))?
+        .extract::<i64>()?;
+    Ok(os.getattr("fdopen")?.call1((fd, mode, 0))?.unbind())
+}
+
 #[cfg(unix)]
 pub(super) fn make_python_pipe_file(
     py: Python<'_>,
@@ -355,26 +377,4 @@ mod tests {
             );
         });
     }
-}
-
-#[cfg(windows)]
-pub(super) fn make_python_pipe_file_from_handle(
-    py: Python<'_>,
-    handle: std::os::windows::io::RawHandle,
-    mode: &str,
-) -> PyResult<Py<PyAny>> {
-    let duplicated =
-        fd_ops::duplicate_handle(handle).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-    let msvcrt = py.import("msvcrt")?;
-    let os = py.import("os")?;
-    let flags = if mode.starts_with('r') {
-        libc::O_RDONLY
-    } else {
-        libc::O_WRONLY
-    } | libc::O_BINARY;
-    let fd = msvcrt
-        .getattr("open_osfhandle")?
-        .call1((duplicated as isize, flags))?
-        .extract::<i64>()?;
-    Ok(os.getattr("fdopen")?.call1((fd, mode, 0))?.unbind())
 }

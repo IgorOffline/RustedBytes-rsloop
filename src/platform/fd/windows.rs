@@ -26,7 +26,7 @@ pub(super) fn dup_raw_fd(fd: RawFd) -> io::Result<RawFd> {
                 // reported via a negative return and errno.
                 let duped = unsafe { libc::dup(fd) };
                 if duped >= 0 {
-                    return Ok(duped as RawFd);
+                    return Ok(RawFd::from(duped));
                 }
             }
             Err(socket_err)
@@ -40,7 +40,7 @@ pub(super) fn duplicate_socket(fd: RawFd) -> io::Result<RawFd> {
     let duplicate = socket.try_clone()?;
     let raw = duplicate.into_raw_socket();
     mem::forget(socket);
-    Ok(raw as RawFd)
+    Ok(raw.cast_signed())
 }
 
 fn socket_from_raw(socket: SOCKET) -> Socket {
@@ -108,7 +108,7 @@ pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Resul
     }
 
     let socket = raw_fd_to_socket(fd)?;
-    let mut timeout = TIMEVAL {
+    let timeout = TIMEVAL {
         tv_sec: timeout_ms / 1000,
         tv_usec: (timeout_ms % 1000) * 1000,
     };
@@ -130,8 +130,7 @@ pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Resul
         std::ptr::null_mut()
     };
     // SAFETY: the fd sets and timeout live for the call; disabled interests use null pointers.
-    let ready =
-        unsafe { winsock_select(0, readfds_ptr, writefds_ptr, &mut exceptfds, &mut timeout) };
+    let ready = unsafe { winsock_select(0, readfds_ptr, writefds_ptr, &mut exceptfds, &timeout) };
     if ready == SOCKET_ERROR {
         return Err(io::Error::last_os_error());
     }

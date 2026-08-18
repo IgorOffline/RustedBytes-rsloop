@@ -12,7 +12,7 @@ pub(super) fn file_from_fd(fd: fd_ops::RawFd) -> PyResult<File> {
     {
         let handle = fd_ops::duplicate_handle_from_fd(fd)
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
-        return Ok(file_from_owned_handle(handle));
+        Ok(file_from_owned_handle(handle))
     }
 
     #[cfg(unix)]
@@ -29,10 +29,10 @@ pub(super) fn new_pipe() -> PyResult<(File, File)> {
     #[cfg(windows)]
     {
         let (read_end, write_end) = create_pipe_handles()?;
-        return Ok((
+        Ok((
             file_from_owned_handle(read_end),
             file_from_owned_handle(write_end),
-        ));
+        ))
     }
 
     #[cfg(unix)]
@@ -48,7 +48,7 @@ fn file_from_owned_handle(handle: windows_sys::Win32::Foundation::HANDLE) -> Fil
 
     // SAFETY: Callers pass a newly owned Windows handle. `File::from_raw_handle` takes ownership and
     // closes it exactly once.
-    unsafe { File::from_raw_handle(handle as _) }
+    unsafe { File::from_raw_handle(handle.cast()) }
 }
 
 #[cfg(unix)]

@@ -59,9 +59,9 @@ pub(super) fn tcp_family(stream: &StdTcpStream) -> c_int {
         #[cfg(unix)]
         _ => libc::AF_INET,
         #[cfg(windows)]
-        Ok(addr) if addr.is_ipv6() => AF_INET6 as c_int,
+        Ok(addr) if addr.is_ipv6() => c_int::from(AF_INET6),
         #[cfg(windows)]
-        _ => AF_INET as c_int,
+        _ => c_int::from(AF_INET),
     }
 }
 pub(super) struct StreamTransportStateConfig {

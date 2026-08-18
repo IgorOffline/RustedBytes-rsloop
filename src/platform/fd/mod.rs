@@ -104,27 +104,27 @@ pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Resul
 pub async fn wait_readable(fd: RawFd) -> PyResult<()> {
     #[cfg(windows)]
     {
-        if let Ok(stream) = duplicate_tcp_stream(fd) {
-            if stream.peer_addr().is_ok() {
-                let (tx, rx) = futures::channel::oneshot::channel();
-                let task = crate::windows_vibeio::spawn(move || async move {
-                    let result = async {
-                        let stream = vibeio::net::PollTcpStream::from_std(stream)?;
-                        let mut buf = [0_u8; 1];
-                        stream.peek(&mut buf).await.map(|_| ())
-                    }
-                    .await;
-                    let _ = tx.send(result);
-                });
-
-                if let Ok(task) = task {
-                    let result = rx
-                        .await
-                        .map_err(|_| PyRuntimeError::new_err("vibeio wait dropped"))?
-                        .map_err(|err| PyRuntimeError::new_err(err.to_string()));
-                    crate::windows_vibeio::cancel(task);
-                    return result;
+        if let Ok(stream) = duplicate_tcp_stream(fd)
+            && stream.peer_addr().is_ok()
+        {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            let task = crate::windows_vibeio::spawn(move || async move {
+                let result = async {
+                    let stream = vibeio::net::PollTcpStream::from_std(stream)?;
+                    let mut buf = [0_u8; 1];
+                    stream.peek(&mut buf).await.map(|_| ())
                 }
+                .await;
+                let _ = tx.send(result);
+            });
+
+            if let Ok(task) = task {
+                let result = rx
+                    .await
+                    .map_err(|_| PyRuntimeError::new_err("vibeio wait dropped"))?
+                    .map_err(|err| PyRuntimeError::new_err(err.to_string()));
+                crate::windows_vibeio::cancel(task);
+                return result;
             }
         }
     }
@@ -139,7 +139,7 @@ pub async fn wait_writable(fd: RawFd) -> PyResult<()> {
 async fn wait_for_interest(fd: RawFd, read: bool, write: bool) -> PyResult<()> {
     #[cfg(windows)]
     {
-        return crate::blocking::run(format!("rsloop-fd-wait-{fd}"), move || {
+        crate::blocking::run(format!("rsloop-fd-wait-{fd}"), move || {
             loop {
                 match poll_fd(fd, read, write, FD_POLL_INTERVAL_MS)? {
                     (read_ready, write_ready)
@@ -153,7 +153,7 @@ async fn wait_for_interest(fd: RawFd, read: bool, write: bool) -> PyResult<()> {
         })
         .await
         .map_err(PyRuntimeError::new_err)?
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()));
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))
     }
 
     #[cfg(not(windows))]

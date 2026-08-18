@@ -240,7 +240,7 @@ pub(crate) async fn run_tcp_socket_reader_task(
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err)
                 if core.poll_reader_requested()
-                    && err.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) =>
+                    && err.raw_os_error() == Some(ERROR_OPERATION_ABORTED.cast_signed()) =>
             {
                 match reader.into_poll() {
                     Ok(poll_reader) => {
