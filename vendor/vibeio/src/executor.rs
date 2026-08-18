@@ -48,8 +48,8 @@ use crate::task::{RemoteWakeContext, Task};
 #[cfg(feature = "time")]
 use crate::timer::Timer;
 
-#[cfg(target_vendor = "apple")]
-const APPLE_MAX_PARK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(any(target_vendor = "apple", windows))]
+const MAX_PARK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 thread_local! {
     static CURRENT_RUNTIME: RefCell<Option<Rc<RuntimeInner>>> = const { RefCell::new(None) };
@@ -202,7 +202,7 @@ impl BlockOnNotify {
         self.ready.swap(false, Ordering::AcqRel)
     }
 
-    #[cfg(target_vendor = "apple")]
+    #[cfg(any(target_vendor = "apple", windows))]
     #[inline]
     fn force_ready(&self) {
         self.ready.store(true, Ordering::Release);
@@ -743,24 +743,24 @@ impl Runtime {
                     continue;
                 }
 
-                #[cfg(all(feature = "time", target_vendor = "apple"))]
+                #[cfg(all(feature = "time", any(target_vendor = "apple", windows)))]
                 inner
                     .driver
-                    .wait(Some(deadline.map_or(APPLE_MAX_PARK_INTERVAL, |deadline| {
-                        deadline.min(APPLE_MAX_PARK_INTERVAL)
+                    .wait(Some(deadline.map_or(MAX_PARK_INTERVAL, |deadline| {
+                        deadline.min(MAX_PARK_INTERVAL)
                     })));
-                #[cfg(all(feature = "time", not(target_vendor = "apple")))]
+                #[cfg(all(feature = "time", not(any(target_vendor = "apple", windows))))]
                 inner.driver.wait(deadline);
-                #[cfg(all(not(feature = "time"), target_vendor = "apple"))]
-                inner.driver.wait(Some(APPLE_MAX_PARK_INTERVAL));
-                #[cfg(all(not(feature = "time"), not(target_vendor = "apple")))]
+                #[cfg(all(not(feature = "time"), any(target_vendor = "apple", windows)))]
+                inner.driver.wait(Some(MAX_PARK_INTERVAL));
+                #[cfg(all(not(feature = "time"), not(any(target_vendor = "apple", windows))))]
                 inner.driver.wait(None);
 
-                // A bounded Apple wait is also a recovery poll. Normal
-                // cross-thread notifications still wake immediately, while a
-                // missed notification can delay the root future by at most one
-                // interval instead of parking it forever.
-                #[cfg(target_vendor = "apple")]
+                // A bounded wait on platforms with native interrupt recovery is
+                // also a recovery poll. Normal cross-thread notifications still
+                // wake immediately, while a missed notification can delay the
+                // root future by at most one interval instead of parking forever.
+                #[cfg(any(target_vendor = "apple", windows))]
                 root_notify.force_ready();
 
                 inner.stop_waiting();
