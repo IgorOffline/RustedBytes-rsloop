@@ -26,8 +26,10 @@ The package exposes:
 Repository metadata currently targets Python `>=3.10`.
 The native runtime requires Linux 6.1+, macOS 13+, or Windows 11+ so its hot
 paths can rely on modern completion, timer, and scheduler primitives.
-Free-threaded CPython is not currently supported; the extension explicitly
-requests GIL-enabled execution while its mutable-buffer fast paths are audited.
+Free-threaded CPython (`3.14t`) is supported: the extension declares
+`gil_used = false`, so importing it no longer re-enables the GIL. See
+[Free-Threaded CPython](#free-threaded-cpython) for what that does and does not
+buy you.
 
 ## Documentation
 
@@ -217,6 +219,46 @@ The implementation lives in
 [`src/transport/stream/fast.rs`](./src/transport/stream/fast.rs) and
 is backed by the lower level transport code in
 [`src/transport/stream/mod.rs`](./src/transport/stream/mod.rs).
+
+## Free-Threaded CPython
+
+`rsloop` builds and runs on free-threaded CPython 3.14 (`3.14t`). The extension
+declares `#[pymodule(gil_used = false)]`, which is what keeps CPython from
+silently switching the GIL back on for the whole process at import time:
+
+```python
+import sys
+import rsloop
+
+assert not sys._is_gil_enabled()
+assert rsloop.build_info()["free_threaded"]
+```
+
+What that buys you is that separate `rsloop.Loop` instances on separate threads
+run *concurrently* rather than taking turns. A loop is still single-threaded
+internally, and asyncio objects are still not thread-safe, so the model is one
+loop per thread — not one loop shared across threads. `call_soon_threadsafe()`
+remains the supported way to hand work to a loop from another thread, and it
+keeps its FIFO ordering guarantee.
+
+The pieces that made this safe:
+
+- the generic stream-reader fast path writes into `StreamReader._buffer`
+  through a raw pointer; the size read, resize, and copy now run inside a
+  critical section on that `bytearray`, so a concurrent mutation cannot leave
+  the copy writing into a freed allocation
+- the ready-queue refill preserves scheduling order when a drain slice leaves
+  older callbacks in the batch. Under the GIL a cross-thread producer could
+  only enqueue while the loop thread was parked, so the reordering was
+  essentially unreachable; without the GIL producers append throughout the
+  drain and it became routine
+
+`tests/test_free_threading.py` covers this: parallel loops over both the native
+and stdlib stream reader paths, `call_soon_threadsafe()` fan-in from eight
+threads, and a check that importing rsloop leaves the GIL off.
+
+Wheels are built for `3.14t` alongside the GIL builds, and the test matrix runs
+it as its own entry.
 
 ## Runtime Model
 

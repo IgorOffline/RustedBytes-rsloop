@@ -502,8 +502,17 @@ impl LoopCore {
                             if ready_batch.is_empty() {
                                 std::mem::swap(&mut ready_batch, pending.deref_mut());
                             } else {
-                                pending.append(&mut ready_batch);
-                                std::mem::swap(&mut ready_batch, pending.deref_mut());
+                                // A refill triggered by READY_DRAIN_SLICE leaves
+                                // older items in `ready_batch`. Newly queued items
+                                // have to go behind them: asyncio orders callbacks
+                                // by when they were scheduled, so putting the
+                                // fresh arrivals first would run a producer's
+                                // later `call_soon_threadsafe` before its earlier
+                                // one. Rare with the GIL, because a producer only
+                                // gets to enqueue while this thread is parked;
+                                // constant on a free-threaded interpreter, where
+                                // producers append all through the drain.
+                                ready_batch.append(pending.deref_mut());
                             }
                         }
                         if pending.is_empty() {

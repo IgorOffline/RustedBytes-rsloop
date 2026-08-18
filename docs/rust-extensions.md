@@ -71,6 +71,21 @@ In this example:
 - the real work happens in the Rust future
 - the future is attached to the currently running Python event loop
 
+## Free-threaded interpreters
+
+`gil_used = true` is the conservative default for a new extension, and it is
+what the example above uses. Be aware of what it costs on a free-threaded
+interpreter: importing *any* module that declares it makes CPython re-enable
+the GIL for the whole process, which undoes rsloop's own free-threading support
+for every loop in that process.
+
+Once your extension's own state is safe under concurrent access — no raw
+pointers into Python-visible mutable buffers held across calls, shared Rust
+state behind mutexes or atomics, module-level caches in `PyOnceLock` rather
+than plain `static mut` — switch it to `gil_used = false`. rsloop itself makes
+that declaration, so a mixed process is only as free-threaded as its most
+conservative extension.
+
 ## Python side usage
 
 From Python, the Rust function looks like a normal async operation:

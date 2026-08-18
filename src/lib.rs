@@ -58,10 +58,17 @@ pub(crate) fn initialize_python_for_tests() {
     });
 }
 
-// The transport fast paths still rely on GIL serialization around mutable
-// Python buffers and raw CPython calls. Do not advertise free-threaded safety
-// until those paths have been audited and synchronized independently.
-#[pymodule(gil_used = true)]
+// The mutable-buffer fast paths no longer rely on GIL serialization: the only
+// Python-visible buffer rsloop writes through a raw pointer is the generic
+// stream reader's `bytearray`, and that resize-and-copy now runs inside a
+// critical section on the buffer itself (`transport::stream::protocol`). Every
+// other raw CPython call either targets an object the caller exclusively owns
+// (the `readexactly` accumulator's private `bytes`) or is an ordinary
+// thread-safe C API call. Shared Rust state is behind mutexes, atomics, or
+// `PyOnceLock`, and `#[pyclass]` interior mutability uses PyO3's atomic borrow
+// flags, so importing under a free-threaded interpreter no longer needs to
+// re-enable the GIL.
+#[pymodule(gil_used = false)]
 fn _loop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     module_init::add_module_contents(m)
