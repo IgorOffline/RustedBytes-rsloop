@@ -459,6 +459,8 @@ impl UntilReadState {
 
 #[cfg(test)]
 mod until_scan_tests {
+    use proptest::prelude::*;
+
     use super::{Separators, UntilReadState, UntilScan, find_from};
 
     fn separators(list: &[&[u8]]) -> Separators {
@@ -562,6 +564,129 @@ mod until_scan_tests {
         assert!(UntilReadState::new(separators(&[b""]), false).is_err());
         // The shortest is checked, so an empty entry anywhere is rejected.
         assert!(UntilReadState::new(separators(&[b"\n", b""]), false).is_err());
+    }
+
+    /// Independent oracle: literal window search, no memchr, no offset skipping.
+    fn literal_find(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+        if needle.is_empty() || needle.len() > haystack.len() {
+            return None;
+        }
+        // `start > end` makes an inclusive range empty, which covers `from`
+        // running past the last position a match could start at.
+        (from..=haystack.len() - needle.len())
+            .find(|&at| &haystack[at..at + needle.len()] == needle)
+    }
+
+    fn naive_first_match(data: &[u8], separators: &[Vec<u8>]) -> Option<(usize, usize)> {
+        let mut sorted = separators.to_vec();
+        sorted.sort_by_key(Vec::len);
+        let mut best: Option<(usize, usize)> = None;
+        for separator in &sorted {
+            if let Some(match_start) = literal_find(data, separator, 0) {
+                let match_end = match_start + separator.len();
+                if best.is_none_or(|(_, best_end)| match_end < best_end) {
+                    best = Some((match_start, match_end));
+                }
+            }
+        }
+        best
+    }
+
+    fn found_pair(scan: &UntilScan) -> Option<(usize, usize)> {
+        match scan {
+            UntilScan::Found {
+                match_start,
+                match_end,
+            } => Some((*match_start, *match_end)),
+            _ => None,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            max_shrink_iters: 10_000,
+            ..ProptestConfig::default()
+        })]
+
+        /// Feeding the buffer in pieces has to reach the same match as one pass
+        /// over the whole thing. This is what the `offset` skip could break: it
+        /// advances past bytes proven not to start a separator, so an off-by-one
+        /// there loses a separator that straddles a chunk boundary.
+        #[test]
+        fn incremental_scanning_agrees_with_a_single_pass(
+            data in prop::collection::vec(prop::sample::select(&b"ab\r\n\x00"[..]), 0..400),
+            separator_list in prop::collection::vec(
+                prop::collection::vec(prop::sample::select(&b"ab\r\n"[..]), 1..4),
+                1..4,
+            ),
+            chunk in 1_usize..13,
+        ) {
+            let expected = naive_first_match(&data, &separator_list);
+
+            let mut bulk = UntilReadState::new(
+                Separators::from_list(separator_list.clone()),
+                false,
+            ).expect("non-empty separators");
+            prop_assert_eq!(found_pair(&bulk.scan(&data, usize::MAX)), expected);
+
+            let mut incremental = UntilReadState::new(
+                Separators::from_list(separator_list),
+                false,
+            ).expect("non-empty separators");
+            let mut reached = None;
+            let mut filled = 0;
+            loop {
+                filled = (filled + chunk).min(data.len());
+                let scan = incremental.scan(&data[..filled], usize::MAX);
+                if let Some(pair) = found_pair(&scan) {
+                    reached = Some(pair);
+                    break;
+                }
+                if filled == data.len() {
+                    break;
+                }
+            }
+            prop_assert_eq!(reached, expected);
+        }
+
+        /// The offset left by a fruitless pass has to be exactly asyncio's
+        /// `max(0, buflen + 1 - max_seplen)`. A smaller offset is still safe --
+        /// it only rescans -- so `incremental_scanning_agrees_with_a_single_pass`
+        /// cannot see the difference. It is observable anyway, because this
+        /// offset is what `LimitOverrunError.consumed` reports and what the
+        /// limit is compared against.
+        #[test]
+        fn a_fruitless_scan_leaves_the_exact_asyncio_offset(
+            len in 0_usize..200,
+            seplen in 1_usize..6,
+        ) {
+            // A separator drawn from an alphabet the data never uses, so every
+            // pass is guaranteed to come up empty.
+            let data = vec![b'a'; len];
+            let separator = vec![b'z'; seplen];
+            let mut state = UntilReadState::new(Separators::single(&separator), false)
+                .expect("non-empty separator");
+
+            let scan = state.scan(&data, usize::MAX);
+            prop_assert!(matches!(scan, UntilScan::NeedMore));
+            let expected = if len < seplen { 0 } else { len + 1 - seplen };
+            prop_assert_eq!(state.offset, expected);
+        }
+
+        /// `find_from` has to behave like `bytes.find(needle, from)` for every
+        /// start offset, including ones past the end of the haystack.
+        #[test]
+        fn find_from_agrees_with_a_literal_search(
+            haystack in prop::collection::vec(prop::sample::select(&b"abc"[..]), 0..80),
+            needle in prop::collection::vec(prop::sample::select(&b"abc"[..]), 1..4),
+            from in 0_usize..90,
+        ) {
+            prop_assert_eq!(
+                find_from(&haystack, &needle, from),
+                literal_find(&haystack, &needle, from)
+            );
+        }
     }
 
     #[test]
