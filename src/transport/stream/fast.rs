@@ -276,11 +276,357 @@ mod read_buffer_tests {
     }
 }
 
+/// `bytes.find(needle, from)` over a slice.
+#[inline]
+fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if from > haystack.len() {
+        return None;
+    }
+    let hay = &haystack[from..];
+    let found = match needle {
+        [] => Some(0),
+        [byte] => memchr::memchr(*byte, hay),
+        _ => memchr::memmem::find(hay, needle),
+    };
+    found.map(|index| index + from)
+}
+
+/// Result of one pass of the `readuntil()` scan over the buffered bytes.
+enum UntilScan {
+    Found {
+        match_start: usize,
+        match_end: usize,
+    },
+    /// No separator yet. Whether that is a wait or an `IncompleteReadError`
+    /// depends on EOF, which is why `is_pending` takes it as an argument.
+    NeedMore,
+    /// The unsearchable prefix passed the stream limit with no separator.
+    OverLimit { consumed: usize },
+}
+
+impl UntilScan {
+    #[inline]
+    fn is_pending(&self, eof: bool) -> bool {
+        matches!(self, Self::NeedMore) && !eof
+    }
+}
+
+/// Longest separator kept out of the allocator. Covers `b"\n"`, `b"\r\n"`,
+/// `b"\r\n\r\n"` and the usual one-byte delimiters.
+const INLINE_SEPARATOR_LEN: usize = 8;
+
+/// The separator list for one `readuntil()`.
+///
+/// A single short separator covers `readline()` and nearly every
+/// `readuntil()`, and this is rebuilt on every call, so that case is stored
+/// inline: a heap allocation here would be a noticeable slice of a `readline()`
+/// that otherwise costs about 0.2 us.
+enum Separators {
+    Inline {
+        bytes: [u8; INLINE_SEPARATOR_LEN],
+        len: usize,
+    },
+    Heap(Vec<Vec<u8>>),
+}
+
+impl Separators {
+    fn single(bytes: &[u8]) -> Self {
+        if bytes.len() > INLINE_SEPARATOR_LEN {
+            return Self::Heap(vec![bytes.to_vec()]);
+        }
+        let mut inline = [0_u8; INLINE_SEPARATOR_LEN];
+        inline[..bytes.len()].copy_from_slice(bytes);
+        Self::Inline {
+            bytes: inline,
+            len: bytes.len(),
+        }
+    }
+
+    fn from_list(list: Vec<Vec<u8>>) -> Self {
+        if let [only] = list.as_slice() {
+            return Self::single(only);
+        }
+        Self::Heap(list)
+    }
+
+    /// Order shortest-first, matching `sorted(separator, key=len)`. The sort has
+    /// to stay stable so equal-length separators keep their given order.
+    fn sort_by_length(&mut self) {
+        if let Self::Heap(list) = self {
+            list.sort_by_key(Vec::len);
+        }
+    }
+
+    fn shortest(&self) -> Option<&[u8]> {
+        match self {
+            Self::Inline { bytes, len } => Some(&bytes[..*len]),
+            Self::Heap(list) => list.first().map(Vec::as_slice),
+        }
+    }
+
+    fn longest_len(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => *len,
+            Self::Heap(list) => list.last().map_or(0, Vec::len),
+        }
+    }
+}
+
+/// Scan state for one `readuntil()` / `readline()` call.
+///
+/// `offset` is asyncio's: the number of leading buffer bytes already known not
+/// to start a separator. Carrying it across feeds is what keeps assembling a
+/// long line linear instead of rescanning the whole buffer per chunk.
+struct UntilReadState {
+    separators: Separators,
+    min_seplen: usize,
+    max_seplen: usize,
+    offset: usize,
+    /// `readline()` translates the two error outcomes rather than raising them.
+    line_mode: bool,
+}
+
+impl UntilReadState {
+    fn new(mut separators: Separators, line_mode: bool) -> PyResult<Self> {
+        // asyncio sorts shortest-first and keeps a strictly closer match end, so
+        // the shortest separator wins when two of them end at the same byte.
+        separators.sort_by_length();
+        let Some(shortest) = separators.shortest() else {
+            return Err(PyValueError::new_err(
+                "Separator should contain at least one element",
+            ));
+        };
+        let min_seplen = shortest.len();
+        if min_seplen == 0 {
+            return Err(PyValueError::new_err(
+                "Separator should be at least one-byte string",
+            ));
+        }
+        let max_seplen = separators.longest_len();
+        Ok(Self {
+            separators,
+            min_seplen,
+            max_seplen,
+            offset: 0,
+            line_mode,
+        })
+    }
+
+    /// One iteration of asyncio's `readuntil` scan loop.
+    fn scan(&mut self, buffer: &[u8], limit: usize) -> UntilScan {
+        let buflen = buffer.len();
+        if buflen.saturating_sub(self.offset) < self.min_seplen {
+            return UntilScan::NeedMore;
+        }
+
+        let offset = self.offset;
+        let mut best: Option<(usize, usize)> = None;
+        let mut consider = |separator: &[u8]| {
+            let Some(match_start) = find_from(buffer, separator, offset) else {
+                return;
+            };
+            let match_end = match_start + separator.len();
+            if best.is_none_or(|(_, best_end)| match_end < best_end) {
+                best = Some((match_start, match_end));
+            }
+        };
+        match &self.separators {
+            Separators::Inline { bytes, len } => consider(&bytes[..*len]),
+            Separators::Heap(list) => {
+                for separator in list {
+                    consider(separator);
+                }
+            }
+        }
+        if let Some((match_start, match_end)) = best {
+            return UntilScan::Found {
+                match_start,
+                match_end,
+            };
+        }
+
+        // Everything but the trailing `max_seplen - 1` bytes is now known not to
+        // begin a separator, so the next pass can start there.
+        self.offset = (buflen + 1).saturating_sub(self.max_seplen);
+        if self.offset > limit {
+            return UntilScan::OverLimit {
+                consumed: self.offset,
+            };
+        }
+        UntilScan::NeedMore
+    }
+}
+
+#[cfg(test)]
+mod until_scan_tests {
+    use super::{Separators, UntilReadState, UntilScan, find_from};
+
+    fn separators(list: &[&[u8]]) -> Separators {
+        Separators::from_list(list.iter().map(|sep| sep.to_vec()).collect())
+    }
+
+    fn until_state(list: &[&[u8]]) -> UntilReadState {
+        UntilReadState::new(separators(list), false).expect("valid separators")
+    }
+
+    #[test]
+    fn find_from_matches_bytes_find_semantics() {
+        assert_eq!(find_from(b"hello world", b"o", 0), Some(4));
+        assert_eq!(find_from(b"hello world", b"o", 5), Some(7));
+        assert_eq!(find_from(b"hello world", b"o", 8), None);
+        assert_eq!(find_from(b"hello world", b"lo w", 0), Some(3));
+        assert_eq!(find_from(b"hello", b"hello world", 0), None);
+        assert_eq!(find_from(b"hello", b"l", 99), None);
+    }
+
+    #[test]
+    fn scan_finds_a_buffered_separator() {
+        let mut state = until_state(&[b"\n"]);
+        let scan = state.scan(b"line one\nline two", 64);
+        assert!(matches!(
+            scan,
+            UntilScan::Found {
+                match_start: 8,
+                match_end: 9
+            }
+        ));
+    }
+
+    #[test]
+    fn scan_keeps_a_partial_separator_in_range_across_feeds() {
+        // "xxA" ends mid-separator, so the next pass must resume at the "A"
+        // rather than skipping the whole buffer.
+        let mut state = until_state(&[b"ABC"]);
+        assert!(matches!(state.scan(b"xxA", 64), UntilScan::NeedMore));
+        assert_eq!(state.offset, 1);
+        let scan = state.scan(b"xxABCyy", 64);
+        assert!(matches!(
+            scan,
+            UntilScan::Found {
+                match_start: 2,
+                match_end: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn scan_advances_the_offset_so_rescans_stay_linear() {
+        let mut state = until_state(&[b"\n"]);
+        assert!(matches!(state.scan(b"aaaa", 64), UntilScan::NeedMore));
+        assert_eq!(state.offset, 4);
+        assert!(matches!(state.scan(b"aaaaaaaa", 64), UntilScan::NeedMore));
+        assert_eq!(state.offset, 8);
+    }
+
+    #[test]
+    fn scan_reports_overrun_only_past_the_limit() {
+        let mut state = until_state(&[b"\n"]);
+        assert!(matches!(state.scan(b"12345678", 8), UntilScan::NeedMore));
+
+        let mut state = until_state(&[b"\n"]);
+        let scan = state.scan(b"123456789", 8);
+        assert!(matches!(scan, UntilScan::OverLimit { consumed: 9 }));
+    }
+
+    #[test]
+    fn scan_breaks_an_end_tie_towards_the_shortest_separator() {
+        // asyncio sorts shortest-first and keeps a strictly closer end, so the
+        // one-byte separator's later start is what the limit is measured on.
+        let mut state = until_state(&[b"ab", b"b"]);
+        let scan = state.scan(b"xxab yy", 64);
+        assert!(matches!(
+            scan,
+            UntilScan::Found {
+                match_start: 3,
+                match_end: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn scan_prefers_the_earliest_end_across_separators() {
+        let mut state = until_state(&[b"\r\n", b"!"]);
+        let scan = state.scan(b"hi!there\r\n", 64);
+        assert!(matches!(
+            scan,
+            UntilScan::Found {
+                match_start: 2,
+                match_end: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn new_rejects_empty_separator_lists_and_empty_separators() {
+        assert!(UntilReadState::new(separators(&[]), false).is_err());
+        assert!(UntilReadState::new(separators(&[b""]), false).is_err());
+        // The shortest is checked, so an empty entry anywhere is rejected.
+        assert!(UntilReadState::new(separators(&[b"\n", b""]), false).is_err());
+    }
+
+    #[test]
+    fn single_short_separators_stay_out_of_the_allocator() {
+        assert!(matches!(
+            Separators::single(b"\r\n"),
+            Separators::Inline { len: 2, .. }
+        ));
+        // A one-element tuple collapses to the inline form too.
+        assert!(matches!(
+            separators(&[b"\n"]),
+            Separators::Inline { len: 1, .. }
+        ));
+        // Anything longer than the inline budget spills, and still scans.
+        let long = b"--boundary-marker";
+        assert!(matches!(Separators::single(long), Separators::Heap(_)));
+        let mut state = until_state(&[long]);
+        assert!(matches!(
+            state.scan(b"body--boundary-marker!", 64),
+            UntilScan::Found {
+                match_start: 4,
+                match_end: 21
+            }
+        ));
+    }
+}
+
+/// How a finished `readuntil()` / `readline()` resolves its awaitable.
+enum UntilOutcome {
+    Value(Py<PyAny>),
+    Exception(Py<PyAny>),
+}
+
+/// Collect the separator argument, accepting the tuple form Python 3.13+ takes.
+fn extract_separators(separator: &Bound<'_, PyAny>) -> PyResult<Separators> {
+    if let Ok(tuple) = separator.cast::<PyTuple>() {
+        let mut list = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            list.push(extract_separator_bytes(&item)?);
+        }
+        return Ok(Separators::from_list(list));
+    }
+    // The single-separator path is the hot one, and a `bytes` object lends its
+    // buffer directly, so it reaches the inline form without allocating.
+    if let Ok(bytes) = separator.cast::<PyBytes>() {
+        return Ok(Separators::single(bytes.as_bytes()));
+    }
+    Ok(Separators::single(&separator.extract::<Vec<u8>>()?))
+}
+
+fn extract_separator_bytes(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(bytes.as_bytes().to_vec());
+    }
+    value.extract::<Vec<u8>>()
+}
+
 #[derive(Clone)]
 enum ReadWaitKind {
     Any(usize),
     Exact(usize),
     All,
+    /// The separator search state lives in `ReadWaiter::until`, so cloning this
+    /// kind on every feed stays free.
+    Until,
 }
 
 struct ReadWaiter {
@@ -288,6 +634,7 @@ struct ReadWaiter {
     future: Py<PyAny>,
     kind: ReadWaitKind,
     exact: Option<ExactReadAccumulator>,
+    until: Option<UntilReadState>,
 }
 
 struct ExactReadAccumulator {
@@ -572,6 +919,31 @@ impl PyFastStreamReader {
                 let data = self.unread_all_bytes_object(py);
                 Self::set_future_result_or_ignore_cancelled(py, &future, data)?;
             }
+            ReadWaitKind::Until => {
+                let limit = self.limit;
+                let (scan, line_mode) = {
+                    let Some(state) = self
+                        .waiter
+                        .as_mut()
+                        .and_then(|waiter| waiter.until.as_mut())
+                    else {
+                        return Ok(());
+                    };
+                    (state.scan(self.buffer.unread(), limit), state.line_mode)
+                };
+                if scan.is_pending(self.eof) {
+                    return Ok(());
+                }
+                self.waiter = None;
+                match self.resolve_until_scan(py, scan, line_mode)? {
+                    UntilOutcome::Value(value) => {
+                        Self::set_future_result_or_ignore_cancelled(py, &future, value)?;
+                    }
+                    UntilOutcome::Exception(exc) => {
+                        Self::set_future_exception_or_ignore_cancelled(py, &future, exc)?;
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -582,6 +954,7 @@ impl PyFastStreamReader {
         py: Python<'_>,
         func_name: &str,
         kind: ReadWaitKind,
+        until: Option<UntilReadState>,
     ) -> PyResult<Py<PyAny>> {
         if self.waiter.is_some() {
             return Err(PyValueError::new_err(format!(
@@ -605,6 +978,7 @@ impl PyFastStreamReader {
             future: future.clone_ref(py),
             kind,
             exact,
+            until,
         });
         if let Some(waiter) = &mut self.waiter
             && let Some(exact) = &mut waiter.exact
@@ -674,7 +1048,7 @@ impl PyFastStreamReader {
                 let data = self.unread_all_bytes_object(py);
                 return self.ready_result_awaitable(py, data);
             }
-            return self.start_waiter(py, "read", ReadWaitKind::All);
+            return self.start_waiter(py, "read", ReadWaitKind::All, None);
         }
         let n = usize::try_from(n).expect("nonnegative read size fits usize");
         if !self.buffer.is_empty() || self.eof {
@@ -682,7 +1056,7 @@ impl PyFastStreamReader {
             self.maybe_resume_transport(py)?;
             return self.ready_result_awaitable(py, data);
         }
-        self.start_waiter(py, "read", ReadWaitKind::Any(n))
+        self.start_waiter(py, "read", ReadWaitKind::Any(n), None)
     }
 
     fn build_readexactly_future(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
@@ -702,7 +1076,124 @@ impl PyFastStreamReader {
             self.buffer.consume_all();
             return self.ready_exception_future(py, err);
         }
-        self.start_waiter(py, "readexactly", ReadWaitKind::Exact(n))
+        self.start_waiter(py, "readexactly", ReadWaitKind::Exact(n), None)
+    }
+
+    fn limit_overrun_error(py: Python<'_>, message: &str, consumed: usize) -> PyResult<Py<PyAny>> {
+        let asyncio = py.import("asyncio")?;
+        Ok(asyncio
+            .getattr("LimitOverrunError")?
+            .call1((message, consumed))?
+            .unbind())
+    }
+
+    /// `IncompleteReadError` with an undefined expected size, which is what
+    /// `readuntil()` raises: the caller never said how many bytes it wanted.
+    fn incomplete_until_error(py: Python<'_>, partial: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let asyncio = py.import("asyncio")?;
+        Ok(asyncio
+            .getattr("IncompleteReadError")?
+            .call1((partial, py.None()))?
+            .unbind())
+    }
+
+    fn until_limit_overrun(
+        &mut self,
+        py: Python<'_>,
+        message: &str,
+        consumed: usize,
+        line_mode: bool,
+    ) -> PyResult<UntilOutcome> {
+        if !line_mode {
+            // readuntil() leaves the buffer intact so the data survives for a
+            // retry with a larger limit.
+            return Ok(UntilOutcome::Exception(Self::limit_overrun_error(
+                py, message, consumed,
+            )?));
+        }
+        // readline() drops the oversized line instead — including its newline
+        // when one was found — and reports a plain ValueError.
+        let unread = self.buffer.unread();
+        if unread.len() > consumed && unread[consumed] == b'\n' {
+            self.buffer.consume(consumed + 1);
+        } else {
+            self.buffer.consume_all();
+        }
+        self.maybe_resume_transport(py)?;
+        Ok(UntilOutcome::Exception(
+            PyValueError::new_err(message.to_owned())
+                .into_value(py)
+                .into_any(),
+        ))
+    }
+
+    /// Turn a finished scan into the value or exception the awaitable carries.
+    /// Only called once `UntilScan::is_pending` has ruled out waiting, so
+    /// `NeedMore` here always means EOF arrived first.
+    fn resolve_until_scan(
+        &mut self,
+        py: Python<'_>,
+        scan: UntilScan,
+        line_mode: bool,
+    ) -> PyResult<UntilOutcome> {
+        match scan {
+            UntilScan::Found {
+                match_start,
+                match_end,
+            } => {
+                if match_start > self.limit {
+                    return self.until_limit_overrun(
+                        py,
+                        "Separator is found, but chunk is longer than limit",
+                        match_start,
+                        line_mode,
+                    );
+                }
+                let value = Self::bytes_object(py, &self.buffer.unread()[..match_end]);
+                self.buffer.consume(match_end);
+                self.maybe_resume_transport(py)?;
+                Ok(UntilOutcome::Value(value))
+            }
+            UntilScan::OverLimit { consumed } => self.until_limit_overrun(
+                py,
+                "Separator is not found, and chunk exceed the limit",
+                consumed,
+                line_mode,
+            ),
+            UntilScan::NeedMore => {
+                let partial = self.unread_all_bytes_object(py);
+                if line_mode {
+                    // readline() reports the unterminated tail as the line, and
+                    // an empty bytes object once the buffer is drained.
+                    return Ok(UntilOutcome::Value(partial));
+                }
+                Ok(UntilOutcome::Exception(Self::incomplete_until_error(
+                    py, partial,
+                )?))
+            }
+        }
+    }
+
+    fn build_until_future(
+        &mut self,
+        py: Python<'_>,
+        func_name: &str,
+        mut state: UntilReadState,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(exc) = self.exception.as_ref() {
+            return self.ready_exception_future(py, exc.clone_ref(py));
+        }
+        let line_mode = state.line_mode;
+        // A chunk can complete the separator and set EOF at once, so the buffer
+        // is always inspected before EOF is allowed to end the read.
+        let scan = state.scan(self.buffer.unread(), self.limit);
+        if scan.is_pending(self.eof) {
+            return self.start_waiter(py, func_name, ReadWaitKind::Until, Some(state));
+        }
+        match self.resolve_until_scan(py, scan, line_mode)? {
+            UntilOutcome::Value(value) => self.ready_result_awaitable(py, value),
+            UntilOutcome::Exception(exc) => self.ready_exception_future(py, exc),
+        }
     }
 }
 
@@ -812,6 +1303,30 @@ impl PyFastStreamReader {
 
     fn readexactly(&mut self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
         self.build_readexactly_future(py, n)
+    }
+
+    #[pyo3(signature = (separator=None))]
+    fn readuntil(
+        &mut self,
+        py: Python<'_>,
+        separator: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let separators = match separator {
+            Some(separator) => extract_separators(separator),
+            None => Ok(Separators::single(b"\n")),
+        };
+        let state = match separators.and_then(|separators| UntilReadState::new(separators, false)) {
+            Ok(state) => state,
+            // asyncio validates the separator inside the coroutine, so these
+            // surface when the awaitable is awaited rather than when it is made.
+            Err(err) => return self.ready_exception_future(py, err.into_value(py).into_any()),
+        };
+        self.build_until_future(py, "readuntil", state)
+    }
+
+    fn readline(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let state = UntilReadState::new(Separators::single(b"\n"), true)?;
+        self.build_until_future(py, "readline", state)
     }
 }
 

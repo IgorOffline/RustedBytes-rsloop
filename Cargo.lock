@@ -929,6 +929,7 @@ dependencies = [
  "crossbeam-channel",
  "futures",
  "libc",
+ "memchr",
  "profiling",
  "proptest",
  "pyo3",
