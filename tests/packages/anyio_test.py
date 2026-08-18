@@ -11,12 +11,12 @@ below is checked explicitly instead of relying on one end-to-end request.
 from __future__ import annotations
 
 import asyncio
+import socket
 import sys
 
 import anyio
 import anyio.to_thread
 import rsloop
-
 from _smoke import reserve_port
 
 CHILD_ARGS = (sys.executable, "-c", "print('anyio-subprocess-ok')")
@@ -69,6 +69,33 @@ async def check_tcp_round_trip() -> None:
         task_group.cancel_scope.cancel()
 
 
+async def check_concurrent_send_backpressure() -> None:
+    """A full Windows send buffer must not block the event-loop thread."""
+    server = socket.create_server(("127.0.0.1", 0))
+
+    async def send_forever(stream: anyio.abc.SocketStream) -> None:
+        while True:
+            await stream.send(b"\0" * 4096)
+
+    try:
+        host, port = server.getsockname()[:2]
+        async with (
+            await anyio.connect_tcp(host, port) as stream,
+            anyio.create_task_group() as task_group,
+        ):
+            task_group.start_soon(send_forever, stream)
+            await anyio.wait_all_tasks_blocked()
+            try:
+                await stream.send(b"concurrent")
+            except anyio.BusyResourceError:
+                pass
+            else:
+                raise AssertionError("concurrent send did not raise BusyResourceError")
+            task_group.cancel_scope.cancel()
+    finally:
+        server.close()
+
+
 async def check_task_group_and_cancellation() -> None:
     finished: list[int] = []
 
@@ -99,6 +126,7 @@ async def main() -> None:
         check_run_process,
         check_open_process,
         check_tcp_round_trip,
+        check_concurrent_send_backpressure,
         check_task_group_and_cancellation,
         check_to_thread,
     ):

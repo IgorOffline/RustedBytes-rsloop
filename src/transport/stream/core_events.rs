@@ -58,12 +58,12 @@ impl StreamTransportCore {
 
         let fd = self.state.lock().expect("poisoned transport state").io_fd;
         if let Some(fd) = fd {
-            // Wake a server reader currently blocked in WSARecv. The operation
+            // Wake a reader currently blocked in WSARecv. The operation
             // still completes through vibeio's IOCP driver with
             // ERROR_OPERATION_ABORTED; the reader handles that result by
             // rebinding the same socket to readiness mode. Cancel before the
-            // direct write so a pending receive cannot throttle the duplicate
-            // writer socket during a bulk response.
+            // direct write so the shared socket becomes nonblocking before a
+            // full send buffer can park the event-loop thread.
             // SAFETY: `fd` is the live transport handle; a null OVERLAPPED requests all pending IO.
             let _ = unsafe { CancelIoEx(fd as HANDLE, std::ptr::null()) };
         }
@@ -76,7 +76,7 @@ impl StreamTransportCore {
         }
         self.poll_reader_ready.store(true, Ordering::Release);
         self.state_cv.notify_all();
-        if self.server_side && self.direct_write_scheduled.load(Ordering::Acquire) {
+        if rebound && self.direct_write_scheduled.load(Ordering::Acquire) {
             let _ = self.loop_core.send_command(LoopCommand::Transport(
                 LoopTransportCommand::StreamWrite(Arc::clone(self)),
             ));

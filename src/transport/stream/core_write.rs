@@ -234,11 +234,16 @@ impl StreamTransportCore {
     pub(super) fn try_write_bytes(self: &Arc<Self>, data: &[u8]) -> io::Result<()> {
         profiling::scope!("StreamTransportCore::try_write_bytes");
         #[cfg(windows)]
-        if data.len() >= SERVER_POLL_READER_WRITE_THRESHOLD {
-            if self.server_side {
-                self.request_poll_reader();
-            }
-            if self.poll_reader_requested() && !self.poll_reader_ready.load(Ordering::Acquire) {
+        if self.direct_writer.is_some()
+            && (!self.server_side || data.len() >= SERVER_POLL_READER_WRITE_THRESHOLD)
+        {
+            // Completion reads require a blocking Winsock handle. Never write
+            // synchronously through that shared handle on the loop thread: a
+            // full send buffer would park the entire event loop. Ensure the
+            // reader is in readiness mode first, which also makes the socket
+            // nonblocking, and stage writes while any transition completes.
+            self.request_poll_reader();
+            if !self.poll_reader_ready.load(Ordering::Acquire) {
                 return self.stage_direct_write(data);
             }
         }
@@ -291,11 +296,11 @@ impl StreamTransportCore {
         }
 
         #[cfg(windows)]
-        if data.remaining().len() >= SERVER_POLL_READER_WRITE_THRESHOLD {
-            if self.server_side {
-                self.request_poll_reader();
-            }
-            if self.poll_reader_requested() && !self.poll_reader_ready.load(Ordering::Acquire) {
+        if self.direct_writer.is_some()
+            && (!self.server_side || data.remaining().len() >= SERVER_POLL_READER_WRITE_THRESHOLD)
+        {
+            self.request_poll_reader();
+            if !self.poll_reader_ready.load(Ordering::Acquire) {
                 return self.stage_direct_write(data.remaining());
             }
         }

@@ -104,11 +104,38 @@ pub(crate) async fn run_tcp_socket_reader_task(
 ) {
     profiling::scope!("stream.run_tcp_socket_reader_task");
 
-    // All TCP protocols start in completion mode on Windows. Besides avoiding
+    // Client protocols can initiate an unbounded stream of writes without
+    // receiving anything first. Start their shared socket in nonblocking poll
+    // mode so a full send buffer can never block the event-loop thread.
+    if !core.server_side {
+        let reader = match VibePollTcpStream::from_shared(stream) {
+            Ok(reader) => reader,
+            Err(err) => {
+                core.mark_poll_reader_ready(false);
+                core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+                    err.to_string(),
+                )));
+                return;
+            }
+        };
+        let Some(buf) = core
+            .acquire_read_buffer_async(STREAM_READ_BUFFER_SIZE)
+            .await
+        else {
+            core.mark_poll_reader_ready(false);
+            return;
+        };
+        core.poll_reader_requested.store(true, Ordering::Release);
+        core.mark_poll_reader_ready(true);
+        run_windows_poll_tcp_reader(core, reader, buf).await;
+        return;
+    }
+
+    // Server protocols start in completion mode on Windows. Besides avoiding
     // readiness polling for callback-driven protocols (aiohttp, websockets,
     // uvicorn), this keeps their hot path aligned with native fast streams.
-    // start_tls and large server writes request a synchronous rebind to poll
-    // mode before they reclaim or heavily write through the shared socket.
+    // start_tls and large writes request a rebind to poll mode before they
+    // reclaim or heavily write through the shared socket.
     let mut reader = match VibeTcpStream::from_shared(stream, vibeio::RegistrationMode::Completion)
     {
         Ok(reader) => reader,
