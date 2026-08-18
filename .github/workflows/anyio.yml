@@ -1,0 +1,119 @@
+name: AnyIO upstream test suite
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/anyio.yml
+      - Cargo.lock
+      - Cargo.toml
+      - pyproject.toml
+      - python/**
+      - scripts/prepare_anyio_rsloop_tests.py
+      - src/**
+      - vendor/**
+  pull_request:
+    paths:
+      - .github/workflows/anyio.yml
+      - Cargo.lock
+      - Cargo.toml
+      - pyproject.toml
+      - python/**
+      - scripts/prepare_anyio_rsloop_tests.py
+      - src/**
+      - vendor/**
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      anyio_ref:
+        description: "AnyIO branch, tag, or commit to test"
+        required: true
+        default: master
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: anyio-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os_name }} / Python ${{ matrix.python_version }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: linux
+            runner: ubuntu-latest
+            python_version: "3.10"
+          - os_name: linux
+            runner: ubuntu-latest
+            python_version: "3.14"
+          - os_name: macos
+            runner: macos-15
+            python_version: "3.10"
+          - os_name: macos
+            runner: macos-15
+            python_version: "3.14"
+          - os_name: windows
+            runner: windows-latest
+            python_version: "3.10"
+          - os_name: windows
+            runner: windows-latest
+            python_version: "3.14"
+
+    steps:
+      - name: Check out rsloop
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check out AnyIO
+        uses: actions/checkout@v6
+        with:
+          repository: agronholm/anyio
+          ref: ${{ inputs.anyio_ref || 'master' }}
+          path: anyio
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          cache-suffix: anyio-${{ matrix.os_name }}-py${{ matrix.python_version }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - name: Install AnyIO test dependencies and local rsloop
+        working-directory: anyio
+        run: |
+          uv pip install --system --group test --editable ".[trio]"
+          uv pip install --system --no-deps --editable ..
+
+      - name: Add rsloop to AnyIO's backend matrix
+        run: python scripts/prepare_anyio_rsloop_tests.py anyio
+
+      - name: Run AnyIO tests with rsloop
+        working-directory: anyio
+        timeout-minutes: 15
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: python -m pytest -v -k rsloop
