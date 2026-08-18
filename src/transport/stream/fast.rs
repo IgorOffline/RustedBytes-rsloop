@@ -152,11 +152,25 @@ impl ReadBuffer {
     }
 }
 
+/// Where proptest keeps the seeds of past failures.
+///
+/// The default puts them in a `proptest-regressions/` directory beside `src/`;
+/// these live under `tests/` with the rest of the test material instead. The
+/// path is resolved from the source file, not the working directory, and keeps
+/// proptest's own per-source-file naming: this file maps to
+/// `tests/proptest-regressions/transport/stream/fast.txt`.
+#[cfg(test)]
+fn regression_file() -> Option<Box<dyn proptest::test_runner::FailurePersistence>> {
+    Some(Box::new(
+        proptest::test_runner::FileFailurePersistence::SourceParallel("tests/proptest-regressions"),
+    ))
+}
+
 #[cfg(test)]
 mod read_buffer_tests {
     use proptest::prelude::*;
 
-    use super::{OwnedReadBuffer, ReadBuffer};
+    use super::{OwnedReadBuffer, ReadBuffer, regression_file};
 
     #[derive(Clone, Debug)]
     enum ReadOperation {
@@ -225,6 +239,7 @@ mod read_buffer_tests {
         #![proptest_config(ProptestConfig {
             cases: 64,
             max_shrink_iters: 10_000,
+            failure_persistence: regression_file(),
             ..ProptestConfig::default()
         })]
 
@@ -461,7 +476,7 @@ impl UntilReadState {
 mod until_scan_tests {
     use proptest::prelude::*;
 
-    use super::{Separators, UntilReadState, UntilScan, find_from};
+    use super::{Separators, UntilReadState, UntilScan, find_from, regression_file};
 
     fn separators(list: &[&[u8]]) -> Separators {
         Separators::from_list(list.iter().map(|sep| sep.to_vec()).collect())
@@ -606,6 +621,7 @@ mod until_scan_tests {
         #![proptest_config(ProptestConfig {
             cases: 256,
             max_shrink_iters: 10_000,
+            failure_persistence: regression_file(),
             ..ProptestConfig::default()
         })]
 
