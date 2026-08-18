@@ -1026,15 +1026,21 @@ impl LoopCore {
 
     /// Cancels the tracked I/O task registered for `fd`, if any. Must run on the
     /// loop thread.
-    pub(crate) fn stop_io_task(&self, fd: RawFd) {
+    ///
+    /// Returns whether a task was actually found and cancelled. `IO_TASKS` is a
+    /// thread-local, so a task handed to the runtime thread instead is simply
+    /// not here, and the caller has to cancel it through the command channel.
+    pub(crate) fn stop_io_task(&self, fd: RawFd) -> bool {
         let key = self as *const LoopCore as usize;
         IO_TASKS.with(|tasks| {
             if let Some(map) = tasks.borrow_mut().get_mut(&key)
                 && let Some(handle) = map.remove(&fd)
             {
                 handle.cancel();
+                return true;
             }
-        });
+            false
+        })
     }
 
     #[inline]

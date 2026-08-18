@@ -60,6 +60,66 @@ class CompatibilityTests(unittest.TestCase):
         self.assertLessEqual(after_first, before + 2)
         self.assertLessEqual(after_second, after_first + 1)
 
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "requires descriptor enumeration")
+    def test_serving_servers_release_their_listening_socket_on_close(self) -> None:
+        # rsloop hands the accept loop its own dup of the listening socket, so
+        # the accept task has to be cancelled on close or that descriptor stays
+        # open -- and the port stays bound -- for the life of the loop. The
+        # accept task lives in one of two thread-local registries depending on
+        # which thread spawned it, and cancelling in the wrong one silently
+        # does nothing.
+        cycles = 25
+
+        async def churn() -> int:
+            # One warm-up server first: the runtime allocates a few of its own
+            # descriptors lazily, and those are process-lifetime, not per-server.
+            warmup = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+            warmup.close()
+            await warmup.wait_closed()
+            await asyncio.sleep(0)
+
+            before = len(os.listdir("/dev/fd"))
+            for _ in range(cycles):
+                server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+                self.assertTrue(server.is_serving())
+                server.close()
+                await server.wait_closed()
+            # Teardown is handed to the runtime thread, so allow a bounded
+            # settle rather than assuming it has already been observed.
+            for _ in range(100):
+                if len(os.listdir("/dev/fd")) <= before:
+                    break
+                await asyncio.sleep(0.01)
+            return len(os.listdir("/dev/fd")) - before
+
+        leaked = rsloop.run(churn())
+        self.assertLessEqual(
+            leaked,
+            2,
+            f"{cycles} create/close server cycles leaked {leaked} descriptors",
+        )
+
+    @unittest.skipUnless(os.path.isdir("/dev/fd"), "requires descriptor enumeration")
+    def test_closed_server_releases_its_port_for_rebinding(self) -> None:
+        # The user-visible half of the same bug: a leaked listening descriptor
+        # keeps the port bound, so rebinding it fails.
+        async def exercise() -> None:
+            server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            server.close()
+            await server.wait_closed()
+
+            # Without SO_REUSEADDR this only succeeds if the listener is really
+            # gone rather than merely detached from the Server object.
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", port))
+                probe.listen(1)
+            finally:
+                probe.close()
+
+        rsloop.run(exercise())
+
     def test_create_connection_refused_does_not_hang(self) -> None:
         async def main() -> None:
             # Close a bound socket to obtain a port with no listener. On some

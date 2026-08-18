@@ -136,13 +136,23 @@ impl ServerCore {
             .expect("poisoned accept fds")
             .drain(..)
         {
-            if self.loop_core.on_runtime_thread() {
-                self.loop_core.stop_io_task(fd);
-            } else {
-                let _ = self
-                    .loop_core
-                    .send_command(LoopCommand::Io(LoopIoCommand::StopServerAccept(fd)));
+            // The accept task owns its listener, so failing to cancel it leaks
+            // that descriptor for as long as the loop lives. It may sit in
+            // either of two registries -- the loop thread's `IO_TASKS` if it was
+            // spawned from the loop thread, or the runtime thread's dispatcher
+            // map if it went through `StartServerAccept` -- and those are
+            // thread-locals of different threads. `spawn_accept_tasks` picks
+            // between them by where it happens to run, and `create_server`
+            // runs its body on an executor thread while `close()` is called
+            // from Python on the loop thread, so the two decisions routinely
+            // disagree. Try the local registry, then fall back to the command
+            // path rather than assuming.
+            if self.loop_core.on_runtime_thread() && self.loop_core.stop_io_task(fd) {
+                continue;
             }
+            let _ = self
+                .loop_core
+                .send_command(LoopCommand::Io(LoopIoCommand::StopServerAccept(fd)));
         }
 
         self.close_python_sockets();
