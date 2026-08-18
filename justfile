@@ -15,7 +15,7 @@ clippy:
     cargo clippy --all-targets --all-features -- -D warnings
 
 test-rust:
-    {{python}} scripts/run_rust_tests.py
+    uv run python scripts/run_rust_tests.py
 
 test: tls-test-certs test-rust
     uv run python -u scripts/run_python_tests.py

@@ -546,6 +546,11 @@ mod tests {
                     [OsStr::new("-c"), OsStr::new("printf '%s' hello world")]
                 );
             }
+            #[cfg(windows)]
+            assert_eq!(
+                shell.get_program(),
+                std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into())
+            );
 
             let argv = PyTuple::new(py, ["one", "two words"])
                 .expect("argv")

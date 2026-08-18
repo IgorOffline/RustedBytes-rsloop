@@ -44,7 +44,9 @@ def main() -> int:
     env = os.environ.copy()
     env["PYO3_PYTHON"] = str(interpreter)
     env["PYTHONHOME"] = python_home
-    if os.name != "nt" and libdir:
+    if os.name == "nt":
+        env["PATH"] = os.pathsep.join((python_home, env.get("PATH", "")))
+    elif libdir:
         rpath = f"-C link-arg=-Wl,-rpath,{libdir}"
         env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} {rpath}".strip()
 

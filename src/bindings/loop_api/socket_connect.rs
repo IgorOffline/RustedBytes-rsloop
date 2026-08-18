@@ -243,6 +243,7 @@ pub(super) fn fast_sock_connect<'py>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use pyo3::types::{PyString, PyTuple};
 
     use super::*;

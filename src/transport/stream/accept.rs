@@ -42,6 +42,7 @@ use super::tls_transport::spawn_tls_server_transport;
 use super::tuning::max_pending_tls_handshakes;
 use super::{AcceptedStream, PyStreamTransport, ServerCore, ServerListener, TransportSpawnContext};
 use crate::engine::{LoopCommand, LoopTransportCommand};
+#[cfg(unix)]
 use crate::fd_ops;
 use crate::transport::tls::ServerTlsSettings;
 
