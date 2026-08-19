@@ -19,6 +19,21 @@ use super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER;
 use super::{StreamTransportCore, make_stream_extra};
 use crate::fd_ops;
 
+/// Resolve asyncio's optional write-buffer limits without overflowing when a
+/// caller supplies a very large low-water mark.
+fn normalize_write_buffer_limits(
+    high: Option<usize>,
+    low: Option<usize>,
+) -> Option<(usize, usize)> {
+    let high = match (high, low) {
+        (Some(high), _) => high,
+        (None, Some(low)) => low.checked_mul(4)?,
+        (None, None) => DEFAULT_WRITE_BUFFER_HIGH_WATER,
+    };
+    let low = low.unwrap_or(high / 4);
+    (high >= low).then_some((low, high))
+}
+
 impl StreamTransportCore {
     pub(super) fn set_protocol(&self, py: Python<'_>, protocol: Py<PyAny>) -> PyResult<()> {
         let callbacks = build_protocol_callbacks(py, &protocol)?;
@@ -239,18 +254,11 @@ impl StreamTransportCore {
     ) -> PyResult<()> {
         let (should_pause, should_resume) = {
             let mut state = self.state.lock().expect("poisoned transport state");
-            let high = match (high, low) {
-                (Some(high), _) => high,
-                (None, Some(low)) => 4 * low,
-                (None, None) => DEFAULT_WRITE_BUFFER_HIGH_WATER,
-            };
-            let low = low.unwrap_or(high / 4);
-
-            if high < low {
+            let Some((low, high)) = normalize_write_buffer_limits(high, low) else {
                 return Err(PyValueError::new_err(format!(
-                    "high ({high:?}) must be >= low ({low:?}) must be >= 0"
+                    "high ({high:?}) must be >= low ({low:?}) and derived limits must fit usize"
                 )));
-            }
+            };
 
             state.write_buffer.high_water = high;
             state.write_buffer.low_water = low;
@@ -276,5 +284,56 @@ impl StreamTransportCore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod write_buffer_limit_tests {
+    use super::normalize_write_buffer_limits;
+
+    #[test]
+    fn derived_high_water_rejects_overflow() {
+        assert_eq!(normalize_write_buffer_limits(None, Some(usize::MAX)), None);
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{DEFAULT_WRITE_BUFFER_HIGH_WATER, normalize_write_buffer_limits};
+
+    #[kani::proof]
+    fn core_write_buffer_limits_are_ordered_and_overflow_free() {
+        let high: Option<usize> = kani::any();
+        let low: Option<usize> = kani::any();
+        let normalized = normalize_write_buffer_limits(high, low);
+
+        match normalized {
+            Some((resolved_low, resolved_high)) => {
+                assert!(resolved_low <= resolved_high);
+                match (high, low) {
+                    (Some(given_high), Some(given_low)) => {
+                        assert_eq!(resolved_high, given_high);
+                        assert_eq!(resolved_low, given_low);
+                    }
+                    (Some(given_high), None) => {
+                        assert_eq!(resolved_high, given_high);
+                        assert_eq!(resolved_low, given_high / 4);
+                    }
+                    (None, Some(given_low)) => {
+                        assert_eq!(resolved_high, given_low * 4);
+                        assert_eq!(resolved_low, given_low);
+                    }
+                    (None, None) => {
+                        assert_eq!(resolved_high, DEFAULT_WRITE_BUFFER_HIGH_WATER);
+                        assert_eq!(resolved_low, DEFAULT_WRITE_BUFFER_HIGH_WATER / 4);
+                    }
+                }
+            }
+            None => match (high, low) {
+                (Some(given_high), Some(given_low)) => assert!(given_high < given_low),
+                (None, Some(given_low)) => assert!(given_low.checked_mul(4).is_none()),
+                _ => unreachable!("defaulted limits are always valid"),
+            },
+        }
     }
 }

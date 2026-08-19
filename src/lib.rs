@@ -17,6 +17,8 @@ mod profiler;
 mod python_names;
 pub mod rust_async;
 mod transport;
+#[cfg(kani)]
+mod verification;
 
 pub(crate) use platform::fd as fd_ops;
 #[cfg(windows)]

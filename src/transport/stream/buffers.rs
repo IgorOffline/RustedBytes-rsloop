@@ -142,10 +142,7 @@ impl OwnedWriteBuffer {
     }
 
     pub(super) fn try_append(&mut self, data: &[u8]) -> bool {
-        if self.offset != 0
-            || data.len()
-                > super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER.saturating_sub(self.bytes.len())
-        {
+        if !can_append(self.offset, self.bytes.len(), data.len()) {
             return false;
         }
         self.bytes.extend_from_slice(data);
@@ -153,7 +150,7 @@ impl OwnedWriteBuffer {
     }
 
     #[inline]
-    #[cfg(test)]
+    #[cfg(any(test, kani))]
     pub(super) fn from_vec(data: Vec<u8>) -> Self {
         Self {
             bytes: data,
@@ -183,6 +180,63 @@ impl OwnedWriteBuffer {
     }
 }
 
+#[inline]
+fn can_append(offset: usize, current_len: usize, incoming_len: usize) -> bool {
+    offset == 0
+        && current_len <= super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER
+        && incoming_len
+            <= super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER.saturating_sub(current_len)
+}
+
+#[inline]
+fn retain_write_buffer(capacity: usize) -> bool {
+    capacity <= super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER
+}
+
+#[inline]
+fn retain_read_buffer(capacity: usize) -> bool {
+    capacity <= MAX_STREAM_READ_BUFFER_SIZE
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PoolAcquire {
+    Reuse,
+    Allocate,
+    Fallback,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PoolRelease {
+    Store,
+    Discard,
+}
+
+fn pool_acquire(
+    available: usize,
+    allocated: usize,
+    limit: usize,
+    allow_fallback: bool,
+) -> PoolAcquire {
+    if available > 0 {
+        PoolAcquire::Reuse
+    } else if allocated < limit {
+        PoolAcquire::Allocate
+    } else if allow_fallback {
+        PoolAcquire::Fallback
+    } else {
+        PoolAcquire::Unavailable
+    }
+}
+
+fn pool_release(retain: bool, available: usize, limit: usize) -> PoolRelease {
+    if retain && available < limit {
+        PoolRelease::Store
+    } else {
+        PoolRelease::Discard
+    }
+}
+
 impl Drop for OwnedWriteBuffer {
     fn drop(&mut self) {
         if let Some(pool) = self.pool.take() {
@@ -205,13 +259,68 @@ struct WriteBufferPoolState {
     allocated: usize,
 }
 
+impl WriteBufferPoolState {
+    fn new() -> Self {
+        Self {
+            buffers: Vec::with_capacity(WRITE_BUFFER_POOL_LIMIT),
+            allocated: 0,
+        }
+    }
+
+    fn acquire(&mut self, capacity: usize) -> (Vec<u8>, bool, usize, bool) {
+        let (mut buffer, pooled, mut allocation_events, fallback) = match pool_acquire(
+            self.buffers.len(),
+            self.allocated,
+            WRITE_BUFFER_POOL_LIMIT,
+            true,
+        ) {
+            PoolAcquire::Reuse => (
+                self.buffers.pop().expect("available buffer"),
+                true,
+                0,
+                false,
+            ),
+            PoolAcquire::Allocate => {
+                self.allocated += 1;
+                (
+                    Vec::with_capacity(capacity.max(WRITE_BUFFER_BLOCK_SIZE)),
+                    true,
+                    1,
+                    false,
+                )
+            }
+            PoolAcquire::Fallback => (Vec::with_capacity(capacity), false, 0, true),
+            PoolAcquire::Unavailable => unreachable!("write pools permit fallback allocations"),
+        };
+        buffer.clear();
+        if buffer.capacity() < capacity {
+            allocation_events += 1;
+            buffer.reserve(capacity);
+        }
+        (buffer, pooled, allocation_events, fallback)
+    }
+
+    fn release(&mut self, mut buffer: Vec<u8>) {
+        match pool_release(
+            retain_write_buffer(buffer.capacity()),
+            self.buffers.len(),
+            WRITE_BUFFER_POOL_LIMIT,
+        ) {
+            PoolRelease::Store => {
+                buffer.clear();
+                self.buffers.push(buffer);
+            }
+            PoolRelease::Discard => {
+                self.allocated = self.allocated.saturating_sub(1);
+            }
+        }
+    }
+}
+
 impl WriteBufferPool {
     pub(super) fn new() -> Self {
         Self {
-            state: Mutex::new(WriteBufferPoolState {
-                buffers: Vec::with_capacity(WRITE_BUFFER_POOL_LIMIT),
-                allocated: 0,
-            }),
+            state: Mutex::new(WriteBufferPoolState::new()),
             #[cfg(test)]
             allocations: AtomicUsize::new(0),
             #[cfg(test)]
@@ -221,43 +330,22 @@ impl WriteBufferPool {
 
     fn acquire(&self, capacity: usize) -> (Vec<u8>, bool) {
         let mut state = self.state.lock().expect("poisoned write buffer pool");
-        let (mut buffer, pooled) = if let Some(buffer) = state.buffers.pop() {
-            (buffer, true)
-        } else if state.allocated < WRITE_BUFFER_POOL_LIMIT {
-            state.allocated += 1;
-            #[cfg(test)]
-            self.allocations.fetch_add(1, Ordering::Relaxed);
-            (
-                Vec::with_capacity(capacity.max(WRITE_BUFFER_BLOCK_SIZE)),
-                true,
-            )
-        } else {
-            #[cfg(test)]
-            self.fallbacks.fetch_add(1, Ordering::Relaxed);
-            (Vec::with_capacity(capacity), false)
-        };
+        let (buffer, pooled, allocation_events, fallback) = state.acquire(capacity);
         drop(state);
-        buffer.clear();
-        if buffer.capacity() < capacity {
-            #[cfg(test)]
-            self.allocations.fetch_add(1, Ordering::Relaxed);
-            buffer.reserve(capacity);
-        }
+        #[cfg(test)]
+        self.allocations
+            .fetch_add(allocation_events, Ordering::Relaxed);
+        #[cfg(test)]
+        self.fallbacks
+            .fetch_add(usize::from(fallback), Ordering::Relaxed);
+        #[cfg(not(test))]
+        let _ = (allocation_events, fallback);
         (buffer, pooled)
     }
 
-    pub(super) fn release(&self, mut buffer: Vec<u8>) {
+    pub(super) fn release(&self, buffer: Vec<u8>) {
         let mut state = self.state.lock().expect("poisoned write buffer pool");
-        if buffer.capacity() > super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER {
-            state.allocated = state.allocated.saturating_sub(1);
-            return;
-        }
-        buffer.clear();
-        if state.buffers.len() < WRITE_BUFFER_POOL_LIMIT {
-            state.buffers.push(buffer);
-        } else {
-            state.allocated = state.allocated.saturating_sub(1);
-        }
+        state.release(buffer);
     }
 }
 
@@ -278,13 +366,58 @@ struct ReadBufferPoolState {
     allocated: usize,
 }
 
+impl ReadBufferPoolState {
+    fn new() -> Self {
+        Self {
+            buffers: Vec::with_capacity(READ_BUFFER_POOL_LIMIT),
+            allocated: 0,
+        }
+    }
+
+    fn try_acquire(&mut self, capacity: usize) -> (Option<Vec<u8>>, usize) {
+        let (mut buffer, mut allocation_events) = match pool_acquire(
+            self.buffers.len(),
+            self.allocated,
+            READ_BUFFER_POOL_LIMIT,
+            false,
+        ) {
+            PoolAcquire::Reuse => (self.buffers.pop().expect("available buffer"), 0),
+            PoolAcquire::Allocate => {
+                self.allocated += 1;
+                (Vec::with_capacity(capacity), 1)
+            }
+            PoolAcquire::Unavailable => return (None, 0),
+            PoolAcquire::Fallback => unreachable!("read pools do not permit fallback allocations"),
+        };
+        buffer.clear();
+        if buffer.capacity() < capacity {
+            allocation_events += 1;
+            buffer.reserve(capacity);
+        }
+        (Some(buffer), allocation_events)
+    }
+
+    fn release(&mut self, mut buffer: Vec<u8>) {
+        match pool_release(
+            retain_read_buffer(buffer.capacity()),
+            self.buffers.len(),
+            READ_BUFFER_POOL_LIMIT,
+        ) {
+            PoolRelease::Store => {
+                buffer.clear();
+                self.buffers.push(buffer);
+            }
+            PoolRelease::Discard => {
+                self.allocated = self.allocated.saturating_sub(1);
+            }
+        }
+    }
+}
+
 impl ReadBufferPool {
     pub(super) fn new() -> Self {
         Self {
-            state: Mutex::new(ReadBufferPoolState {
-                buffers: Vec::with_capacity(READ_BUFFER_POOL_LIMIT),
-                allocated: 0,
-            }),
+            state: Mutex::new(ReadBufferPoolState::new()),
             available: Condvar::new(),
             async_available: AtomicWaker::new(),
             closed: AtomicBool::new(false),
@@ -295,24 +428,14 @@ impl ReadBufferPool {
 
     pub(super) fn try_acquire(&self, capacity: usize) -> Option<Vec<u8>> {
         let mut state = self.state.lock().expect("poisoned stream read buffer pool");
-        let mut buffer = if let Some(buffer) = state.buffers.pop() {
-            buffer
-        } else if state.allocated < READ_BUFFER_POOL_LIMIT {
-            state.allocated += 1;
-            #[cfg(test)]
-            self.allocations.fetch_add(1, Ordering::Relaxed);
-            Vec::with_capacity(capacity)
-        } else {
-            return None;
-        };
+        let (buffer, allocation_events) = state.try_acquire(capacity);
         drop(state);
-        buffer.clear();
-        if buffer.capacity() < capacity {
-            #[cfg(test)]
-            self.allocations.fetch_add(1, Ordering::Relaxed);
-            buffer.reserve(capacity);
-        }
-        Some(buffer)
+        #[cfg(test)]
+        self.allocations
+            .fetch_add(allocation_events, Ordering::Relaxed);
+        #[cfg(not(test))]
+        let _ = allocation_events;
+        buffer
     }
 
     fn has_available(&self) -> bool {
@@ -355,22 +478,106 @@ impl ReadBufferPool {
         self.notify_all();
     }
 
-    pub(super) fn release(&self, mut buffer: Vec<u8>) {
+    pub(super) fn release(&self, buffer: Vec<u8>) {
         let mut state = self.state.lock().expect("poisoned stream read buffer pool");
-        if buffer.capacity() > MAX_STREAM_READ_BUFFER_SIZE {
-            state.allocated = state.allocated.saturating_sub(1);
-            drop(state);
-            self.notify_all();
-            return;
-        }
-        buffer.clear();
-        if state.buffers.len() < READ_BUFFER_POOL_LIMIT {
-            state.buffers.push(buffer);
-        } else {
-            state.allocated = state.allocated.saturating_sub(1);
-        }
+        state.release(buffer);
         drop(state);
         self.notify_all();
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{
+        MAX_STREAM_READ_BUFFER_SIZE, OwnedWriteBuffer, PoolAcquire, PoolRelease,
+        READ_BUFFER_POOL_LIMIT, WRITE_BUFFER_POOL_LIMIT, can_append, pool_acquire, pool_release,
+        retain_read_buffer, retain_write_buffer,
+    };
+    use crate::verification::{MAX_BYTES, MAX_POOL_OPERATIONS, any_bytes};
+
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn core_owned_write_buffer_preserves_remaining_bytes() {
+        let data = any_bytes::<MAX_BYTES>();
+        let first: usize = kani::any();
+        kani::assume(first <= data.len());
+        let mut buffer = OwnedWriteBuffer::from_vec(data.clone());
+
+        buffer.advance(first);
+        assert_eq!(buffer.remaining(), &data[first..]);
+        assert_eq!(buffer.len(), data.len() - first);
+        assert_eq!(buffer.is_empty(), first == data.len());
+
+        let second: usize = kani::any();
+        kani::assume(second <= buffer.len());
+        buffer.advance(second);
+        assert_eq!(buffer.remaining(), &data[first + second..]);
+        assert_eq!(buffer.is_empty(), first + second == data.len());
+    }
+
+    #[kani::proof]
+    fn core_append_and_retention_decisions_are_overflow_free() {
+        let offset: usize = kani::any();
+        let current_len: usize = kani::any();
+        let incoming_len: usize = kani::any();
+        let high_water = super::super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER;
+
+        let expected =
+            offset == 0 && current_len <= high_water && incoming_len <= high_water - current_len;
+        assert_eq!(can_append(offset, current_len, incoming_len), expected);
+
+        let capacity: usize = kani::any();
+        assert_eq!(
+            retain_read_buffer(capacity),
+            capacity <= MAX_STREAM_READ_BUFFER_SIZE
+        );
+        assert_eq!(retain_write_buffer(capacity), capacity <= high_water);
+    }
+
+    fn verify_pool_accounting(allow_fallback: bool, limit: usize) {
+        let acquire: [bool; MAX_POOL_OPERATIONS] = kani::any();
+        let retain: [bool; MAX_POOL_OPERATIONS] = kani::any();
+        let mut available = 0;
+        let mut allocated = 0;
+        let mut held = 0;
+
+        for index in 0..MAX_POOL_OPERATIONS {
+            if acquire[index] {
+                match pool_acquire(available, allocated, limit, allow_fallback) {
+                    PoolAcquire::Reuse => {
+                        available -= 1;
+                        held += 1;
+                    }
+                    PoolAcquire::Allocate => {
+                        allocated += 1;
+                        held += 1;
+                    }
+                    PoolAcquire::Fallback | PoolAcquire::Unavailable => {}
+                }
+            } else if held > 0 {
+                held -= 1;
+                match pool_release(retain[index], available, limit) {
+                    PoolRelease::Store => available += 1,
+                    PoolRelease::Discard => allocated -= 1,
+                }
+            }
+
+            assert!(available <= allocated);
+            assert!(allocated <= limit);
+            assert_eq!(available + held, allocated);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn extended_read_pool_preserves_sequential_slot_accounting() {
+        verify_pool_accounting(false, READ_BUFFER_POOL_LIMIT);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn extended_write_pool_preserves_sequential_slot_accounting() {
+        verify_pool_accounting(true, WRITE_BUFFER_POOL_LIMIT);
     }
 }
 

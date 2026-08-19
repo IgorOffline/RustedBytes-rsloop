@@ -17,6 +17,21 @@ clippy:
 test-rust:
     uv run python scripts/run_rust_tests.py
 
+# Fast merge-gating proofs; `core_` harnesses must fit the PR runtime budget.
+kani-core:
+    cargo kani --harness core_ -j 2 --output-format terse
+
+# Every proof harness, including longer bounded state sequences.
+kani:
+    cargo kani -j 2 --output-format terse
+
+kani-list:
+    cargo kani list
+
+# Manual audit for over-constrained proof harnesses.
+kani-coverage:
+    cargo kani --harness core_ --coverage -Z source-coverage
+
 test: tls-test-certs test-rust
     uv run python -u scripts/run_python_tests.py
 

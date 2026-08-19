@@ -114,7 +114,7 @@ impl ReadBuffer {
     }
 
     fn consume(&mut self, n: usize) {
-        self.start = (self.start + n).min(self.bytes.len());
+        self.start = self.start.saturating_add(n).min(self.bytes.len());
         self.compact_if_needed();
     }
 
@@ -233,6 +233,17 @@ mod read_buffer_tests {
 
         buffer.replace(b"replacement");
         assert_eq!(buffer.unread(), b"replacement");
+    }
+
+    #[test]
+    fn consuming_an_unbounded_count_saturates_at_the_end() {
+        let mut buffer = ReadBuffer::with_capacity(0);
+        buffer.extend(b"abc");
+        buffer.consume(1);
+        buffer.consume(usize::MAX);
+
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.start, 0);
     }
 
     proptest! {
@@ -469,6 +480,63 @@ impl UntilReadState {
             };
         }
         UntilScan::NeedMore
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{ReadBuffer, Separators, UntilReadState, UntilScan, find_from};
+    use crate::verification::MAX_BYTES;
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn core_read_buffer_consume_saturates_without_overflow() {
+        let count: usize = kani::any();
+        let mut buffer = ReadBuffer::with_capacity(0);
+        buffer.extend(b"abc");
+        buffer.consume(1);
+        buffer.consume(count);
+
+        match count {
+            0 => assert_eq!(buffer.unread(), b"bc"),
+            1 => assert_eq!(buffer.unread(), b"c"),
+            _ => assert!(buffer.is_empty()),
+        }
+        assert!(buffer.start <= buffer.bytes.len());
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn core_find_from_handles_bounded_offsets() {
+        let from = usize::from(kani::any::<u8>() % 7);
+        let expected = match from {
+            0 | 1 => Some(1),
+            2 | 3 => Some(3),
+            _ => None,
+        };
+        assert_eq!(find_from(b"ababa", b"ba", from), expected);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn core_readuntil_fruitless_scan_has_exact_offset() {
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_BYTES);
+        let limit: usize = kani::any();
+        let mut state =
+            UntilReadState::new(Separators::single(b"zz"), false).expect("non-empty separator");
+
+        let scan = state.scan(&[b'a'; MAX_BYTES][..len], limit);
+        let expected_offset = len.saturating_add(1).saturating_sub(2);
+        assert_eq!(state.offset, expected_offset);
+        match scan {
+            UntilScan::OverLimit { consumed } => {
+                assert_eq!(consumed, expected_offset);
+                assert!(expected_offset > limit);
+            }
+            UntilScan::NeedMore => assert!(expected_offset <= limit),
+            UntilScan::Found { .. } => panic!("separator is absent from the input alphabet"),
+        }
     }
 }
 

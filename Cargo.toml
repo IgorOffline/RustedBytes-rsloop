@@ -82,6 +82,13 @@ uninlined_format_args = "allow"
 borrow_as_ptr = "allow"
 ref_as_ptr = "allow"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[package.metadata.kani.flags]
+# Force every proof that reaches a loop to state and review its own bound.
+default-unwind = "1"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

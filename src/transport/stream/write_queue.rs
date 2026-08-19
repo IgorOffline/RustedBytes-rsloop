@@ -13,6 +13,44 @@ struct QueueState {
     receiver_alive: bool,
 }
 
+impl QueueState {
+    fn new() -> Self {
+        Self::with_capacity(INITIAL_WRITER_QUEUE_CAPACITY)
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            commands: VecDeque::with_capacity(capacity),
+            sender_alive: true,
+            receiver_alive: true,
+        }
+    }
+
+    fn enqueue(&mut self, command: WriterCommand) -> Result<(), WriterCommand> {
+        if !self.receiver_alive {
+            return Err(command);
+        }
+        if let WriterCommand::Data(data) = &command
+            && let Some(WriterCommand::Data(pending)) = self.commands.back_mut()
+            && pending.try_append(data.remaining())
+        {
+            return Ok(());
+        }
+        self.commands.push_back(command);
+        Ok(())
+    }
+
+    fn try_dequeue(&mut self) -> Result<WriterCommand, TryRecvError> {
+        if let Some(command) = self.commands.pop_front() {
+            Ok(command)
+        } else if self.sender_alive {
+            Err(TryRecvError::Empty)
+        } else {
+            Err(TryRecvError::Disconnected)
+        }
+    }
+}
+
 struct SharedQueue {
     state: Mutex<QueueState>,
     ready: Condvar,
@@ -33,11 +71,7 @@ pub(super) enum TryRecvError {
 
 pub(super) fn channel() -> (WriterSender, WriterReceiver) {
     let shared = Arc::new(SharedQueue {
-        state: Mutex::new(QueueState {
-            commands: VecDeque::with_capacity(INITIAL_WRITER_QUEUE_CAPACITY),
-            sender_alive: true,
-            receiver_alive: true,
-        }),
+        state: Mutex::new(QueueState::new()),
         ready: Condvar::new(),
     });
     (
@@ -51,16 +85,7 @@ pub(super) fn channel() -> (WriterSender, WriterReceiver) {
 impl WriterSender {
     pub(super) fn send(&self, command: WriterCommand) -> Result<(), WriterCommand> {
         let mut state = self.shared.state.lock().expect("poisoned writer queue");
-        if !state.receiver_alive {
-            return Err(command);
-        }
-        if let WriterCommand::Data(data) = &command
-            && let Some(WriterCommand::Data(pending)) = state.commands.back_mut()
-            && pending.try_append(data.remaining())
-        {
-            return Ok(());
-        }
-        state.commands.push_back(command);
+        state.enqueue(command)?;
         drop(state);
         self.shared.ready.notify_one();
         Ok(())
@@ -97,14 +122,11 @@ impl WriterReceiver {
     }
 
     pub(super) fn try_recv(&self) -> Result<WriterCommand, TryRecvError> {
-        let mut state = self.shared.state.lock().expect("poisoned writer queue");
-        if let Some(command) = state.commands.pop_front() {
-            Ok(command)
-        } else if state.sender_alive {
-            Err(TryRecvError::Empty)
-        } else {
-            Err(TryRecvError::Disconnected)
-        }
+        self.shared
+            .state
+            .lock()
+            .expect("poisoned writer queue")
+            .try_dequeue()
     }
 }
 
@@ -204,5 +226,25 @@ mod tests {
             panic!("expected data");
         };
         assert_eq!(data.remaining(), b"three");
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn core_writer_queue_reports_both_closed_ends() {
+        let mut state = QueueState::with_capacity(0);
+        state.receiver_alive = false;
+        let rejected = state.enqueue(WriterCommand::Stop);
+        assert!(matches!(rejected, Err(WriterCommand::Stop)));
+
+        let mut state = QueueState::with_capacity(0);
+        state.sender_alive = false;
+        assert!(matches!(
+            state.try_dequeue(),
+            Err(TryRecvError::Disconnected)
+        ));
     }
 }
