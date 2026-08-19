@@ -43,6 +43,10 @@ pub enum CallbackKind {
     Writer(RawFd),
 }
 
+/// A Python callback, its positional arguments, and captured execution context.
+///
+/// The value is safe to enqueue across rsloop's worker threads. Invocation must
+/// still happen while attached to Python, normally on the event-loop thread.
 pub struct ReadyCallback {
     id: CallbackId,
     kind: CallbackKind,
@@ -55,6 +59,9 @@ pub struct ReadyCallback {
 
 impl ReadyCallback {
     #[inline]
+    /// Builds a ready callback and selects a zero-, one-, or many-argument fast path.
+    ///
+    /// `context_needs_run` records whether invocation must enter `context`.
     pub fn new(
         py: Python<'_>,
         id: CallbackId,
@@ -88,30 +95,39 @@ impl ReadyCallback {
     }
 
     #[inline]
+    /// Returns the loop-unique identifier assigned to this callback.
     pub fn id(&self) -> CallbackId {
         self.id
     }
 
     #[inline]
+    /// Returns the scheduling source used for diagnostics and re-arming I/O.
     pub fn kind(&self) -> CallbackKind {
         self.kind
     }
 
     #[inline]
+    /// Borrows the underlying Python callable.
     pub fn callback(&self) -> &Py<PyAny> {
         &self.callback
     }
 
     #[inline]
+    /// Borrows the captured Python `contextvars.Context`.
     pub fn context(&self) -> &Py<PyAny> {
         &self.context
     }
 
     #[inline]
+    /// Reports whether invocation needs to enter the captured context.
     pub fn context_needs_run(&self) -> bool {
         self.context_needs_run
     }
 
+    /// Invokes the callback with its stored arguments and execution context.
+    ///
+    /// A nested-context error falls back to direct invocation because that means
+    /// the desired context is already active on this thread.
     pub fn invoke(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         profiling::scope!("ReadyCallback::invoke");
         if !self.context_needs_run {
@@ -145,20 +161,26 @@ impl ReadyCallback {
     }
 
     #[inline]
+    /// Reports whether this callback has been cancelled.
     pub fn cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
 
     #[inline]
+    /// Marks the callback as cancelled.
+    ///
+    /// Cancellation is idempotent and does not remove an already queued value;
+    /// the loop skips it when draining the ready queue.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
-// The handle owns its callback inline (instead of a separate
-// `Arc<ReadyCallback>` allocation) and the ready queue holds `Py<PyHandle>`
-// clones: one allocation per call_soon instead of two. `frozen` lets the
-// event loop read the callback through `Py::get` without borrow checking.
+/// Python's cancellable `asyncio.Handle` equivalent.
+///
+/// The handle owns its callback inline and the ready queue holds `Py<PyHandle>`
+/// clones, requiring one allocation per `call_soon`. The class is frozen so
+/// the event loop can read the callback without dynamic borrow checking.
 #[pyclass(name = "Handle", module = "rsloop._loop", weakref, frozen)]
 pub struct PyHandle {
     callback: ReadyCallback,
@@ -166,11 +188,13 @@ pub struct PyHandle {
 
 impl PyHandle {
     #[inline]
+    /// Wraps a callback in a Python-visible handle.
     pub fn new(callback: ReadyCallback) -> Self {
         Self { callback }
     }
 
     #[inline]
+    /// Borrows the callback controlled by this handle.
     pub fn ready(&self) -> &ReadyCallback {
         &self.callback
     }
@@ -196,6 +220,10 @@ impl PyHandle {
     }
 }
 
+/// Python's cancellable `asyncio.TimerHandle` equivalent.
+///
+/// The weak callback reference lets cancellation update a live scheduled
+/// callback without keeping it alive after the timer queue releases it.
 #[pyclass(
     name = "TimerHandle",
     module = "rsloop._loop",
@@ -211,6 +239,7 @@ pub struct PyTimerHandle {
 
 impl PyTimerHandle {
     #[inline]
+    /// Creates a timer handle for a callback scheduled at loop time `when`.
     pub fn new(callback_id: CallbackId, when: f64, callback: &Arc<ReadyCallback>) -> Self {
         Self {
             callback_id,

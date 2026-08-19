@@ -904,6 +904,11 @@ impl ExactReadAccumulator {
     }
 }
 
+/// Native buffered reader used by rsloop's optimized streams API.
+///
+/// The Python surface mirrors the commonly used `asyncio.StreamReader`
+/// operations while retaining buffers in Rust. Only one read coroutine may wait
+/// at a time, matching asyncio's stream-reader contract.
 #[pyclass(module = "rsloop._loop")]
 pub struct PyFastStreamReader {
     loop_obj: Py<PyAny>,
@@ -1834,6 +1839,10 @@ impl PyFastStreamProtocol {
     }
 }
 
+/// Native stream writer paired with [`PyFastStreamReader`].
+///
+/// Writes use a direct Rust path for rsloop transports and delegate to Python
+/// for foreign asyncio transports.
 #[pyclass(module = "rsloop._loop")]
 pub struct PyFastStreamWriter {
     transport: Py<PyAny>,
@@ -2088,6 +2097,14 @@ fn fast_open_connection_result(py: Python<'_>, created: Py<PyAny>) -> PyResult<P
     Ok(output.unbind().into_any())
 }
 
+/// Returns an awaitable that opens a stream connection.
+///
+/// With a running [`PyLoop`](crate::PyLoop) and no TLS argument, the awaitable
+/// resolves to a native [`PyFastStreamReader`] and [`PyFastStreamWriter`].
+/// Unsupported loop or TLS configurations delegate to
+/// `asyncio.open_connection`.
+///
+/// Extra keyword arguments are forwarded to the loop connection factory.
 #[pyfunction(signature = (host=None, port=None, *, limit=DEFAULT_STREAM_LIMIT, **kwargs))]
 pub fn open_connection(
     py: Python<'_>,
@@ -2122,6 +2139,15 @@ pub fn open_connection(
     .unbind())
 }
 
+/// Returns an awaitable that starts a stream server.
+///
+/// With a running [`PyLoop`](crate::PyLoop) and no TLS argument, accepted
+/// connections use native fast readers and writers before invoking
+/// `client_connected_cb`. Unsupported configurations delegate to
+/// `asyncio.start_server`.
+///
+/// `limit` controls each reader's buffer limit; extra keyword arguments are
+/// forwarded to the loop server factory.
 #[pyfunction(signature = (client_connected_cb, host=None, port=None, *, limit=DEFAULT_STREAM_LIMIT, **kwargs))]
 pub fn start_server(
     py: Python<'_>,

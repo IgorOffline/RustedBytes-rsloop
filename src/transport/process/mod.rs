@@ -80,8 +80,13 @@ pub struct ProcessTransportCore {
     events_scheduled: AtomicBool,
 }
 
+/// Python-visible transport for a spawned child process.
+///
+/// Methods on this class implement the `asyncio.SubprocessTransport` surface;
+/// worker threads communicate with it through the shared core.
 #[pyclass(name = "ProcessTransport", module = "rsloop._loop")]
 pub struct PyProcessTransport {
+    /// Shared subprocess state and pending event queue.
     pub core: Arc<ProcessTransportCore>,
 }
 
@@ -90,6 +95,7 @@ struct ProcessPipeTransportCore {
     closing: AtomicBool,
 }
 
+/// Python-visible half-duplex transport for one subprocess stdio pipe.
 #[pyclass(name = "ProcessPipeTransport", module = "rsloop._loop")]
 pub struct PyProcessPipeTransport {
     core: Arc<ProcessPipeTransportCore>,

@@ -1,8 +1,17 @@
-//! Native extension entry point and the top-level map of the Rust implementation.
+#![warn(missing_docs)]
+
+//! Native extension entry point and Rust interoperability API for `rsloop`.
 //!
-//! `bindings` exposes the Python API, `engine` schedules work, and `transport`
-//! owns network, TLS, and subprocess I/O. Platform details stay behind
-//! `platform` so the higher layers can share one event-loop model.
+//! Most users install `rsloop` as a Python package and interact with its
+//! `asyncio`-compatible classes. The Rust crate is also linkable by downstream
+//! PyO3 extensions: use [`rust_async`] to turn Rust futures into Python
+//! awaitables that inherit the currently running rsloop event loop and Python
+//! [`contextvars`](https://docs.python.org/3/library/contextvars.html) context.
+//!
+//! The remaining exports are compatibility building blocks for rsloop's native
+//! Python classes and event-loop engine. [`PyLoop`] owns a [`LoopCore`], which
+//! coordinates callbacks and transports while keeping Python execution on the
+//! thread that runs the event loop.
 
 mod async_event;
 mod bindings;

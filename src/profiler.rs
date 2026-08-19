@@ -26,6 +26,9 @@ mod imp {
     }
 
     #[pyfunction]
+    /// Starts a process-wide Tracy profiling session.
+    ///
+    /// Returns an error if a session is already active.
     pub fn start_profiler() -> PyResult<()> {
         let mut active = active_profiler()
             .lock()
@@ -51,6 +54,7 @@ mod imp {
     }
 
     #[pyfunction]
+    /// Reports whether a Tracy profiling session is currently active.
     pub fn profiler_running() -> bool {
         active_profiler()
             .lock()
@@ -59,6 +63,9 @@ mod imp {
     }
 
     #[pyfunction]
+    /// Stops the active Tracy profiling session.
+    ///
+    /// Returns an error if no session is active.
     pub fn stop_profiler() -> PyResult<()> {
         let active = active_profiler()
             .lock()
@@ -82,16 +89,19 @@ mod imp {
         "profiler support is disabled; rebuild with `--features profiler`";
 
     #[pyfunction]
+    /// Always returns `false` when profiler support was not compiled in.
     pub fn profiler_running() -> bool {
         false
     }
 
     #[pyfunction]
+    /// Returns an error explaining that profiler support is disabled.
     pub fn start_profiler() -> PyResult<()> {
         Err(PyRuntimeError::new_err(PROFILER_DISABLED_MESSAGE))
     }
 
     #[pyfunction]
+    /// Returns an error explaining that profiler support is disabled.
     pub fn stop_profiler() -> PyResult<()> {
         Err(PyRuntimeError::new_err(PROFILER_DISABLED_MESSAGE))
     }
@@ -100,6 +110,10 @@ mod imp {
 pub use imp::{profiler_running, start_profiler, stop_profiler};
 
 #[pyfunction]
+/// Reports whether this build includes optional Tracy profiler support.
+///
+/// Unlike [`profiler_running`], this describes a compile-time capability and
+/// therefore never changes while the process is running.
 pub const fn profiler_compiled() -> bool {
     cfg!(feature = "profiler")
 }

@@ -259,8 +259,11 @@ impl LoopState {
 
 /// Shared event-loop owner used by Python bindings, the dispatcher, and transports.
 pub struct LoopCore {
+    /// Mutable lifecycle and Python-facing configuration.
     pub state: Mutex<LoopState>,
+    /// Monotonic origin used by [`LoopCore::time`].
     pub start: Instant,
+    /// Whether asyncio debug diagnostics are enabled.
     pub debug_enabled: AtomicBool,
     task_factory_installed: AtomicBool,
     next_callback_id: AtomicU64,
@@ -274,6 +277,10 @@ pub struct LoopCore {
 }
 
 impl LoopCore {
+    /// Creates a loop core and starts its command-dispatcher thread.
+    ///
+    /// Python callbacks are not run on that thread; the dispatcher only
+    /// coordinates runtime work and forwards ready items to the loop thread.
     pub fn new() -> Arc<Self> {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let core = Arc::new(Self {
@@ -302,6 +309,11 @@ impl LoopCore {
         core
     }
 
+    /// Submits a control command to the loop dispatcher.
+    ///
+    /// Commands originating on the active loop thread may be handled locally to
+    /// avoid a channel round trip. `LoopCoreError::ChannelClosed` means the
+    /// dispatcher has already terminated.
     pub fn send_command(&self, command: LoopCommand) -> Result<(), LoopCoreError> {
         profiling::scope!("LoopCore::send_command");
         let command = match self.try_handle_local_command(command) {
@@ -325,43 +337,56 @@ impl LoopCore {
         Ok(())
     }
 
+    /// Reports whether a run session is currently active.
     pub fn is_running(&self) -> bool {
         self.state.lock().expect("poisoned loop state").running
     }
 
+    /// Reports whether this loop has been permanently closed.
     pub fn is_closed(&self) -> bool {
         self.state.lock().expect("poisoned loop state").closed
     }
 
+    /// Enables or disables asyncio debug diagnostics.
     pub fn set_debug(&self, enabled: bool) {
         self.debug_enabled.store(enabled, Ordering::SeqCst);
     }
 
+    /// Returns whether asyncio debug diagnostics are enabled.
     pub fn get_debug(&self) -> bool {
         self.debug_enabled.load(Ordering::SeqCst)
     }
 
     #[inline]
+    /// Reports whether a custom Python task factory is installed.
     pub fn has_task_factory(&self) -> bool {
         self.task_factory_installed.load(Ordering::Relaxed)
     }
 
     #[inline]
+    /// Updates the fast-path flag for custom task-factory installation.
+    ///
+    /// The Python object itself remains protected by [`LoopCore::state`].
     pub fn set_task_factory_installed(&self, installed: bool) {
         self.task_factory_installed
             .store(installed, Ordering::Relaxed);
     }
 
+    /// Allocates a loop-unique callback identifier.
     pub fn next_callback_id(&self) -> CallbackId {
         self.next_callback_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Returns elapsed monotonic seconds on this loop's clock.
     pub fn time(&self) -> f64 {
         self.start.elapsed().as_secs_f64()
     }
 }
 
 impl LoopCore {
+    /// Captures context, creates a Python handle, and schedules a callback.
+    ///
+    /// The callback is eligible for the next ready-queue drain.
     pub fn schedule_callback(
         self: &Arc<Self>,
         py: Python<'_>,
@@ -390,6 +415,10 @@ impl LoopCore {
         Ok(handle)
     }
 
+    /// Captures context and schedules a callback after `delay`.
+    ///
+    /// Returns the shared callback and its absolute value on [`LoopCore::time`],
+    /// which the Python `TimerHandle` exposes as `when()`.
     pub fn schedule_timer(
         self: &Arc<Self>,
         py: Python<'_>,
@@ -420,6 +449,13 @@ impl LoopCore {
         Ok((ready, when))
     }
 
+    /// Runs callbacks and I/O until [`LoopCore::schedule_stop`] is processed.
+    ///
+    /// The caller is the Python loop thread. While parked, the GIL is released
+    /// and the thread drives the loop's `vibeio` runtime; callback drains attach
+    /// to Python again before invoking user code.
+    ///
+    /// Returns an error if the loop is closed or already running.
     #[profiling::function]
     pub fn run_forever(self: &Arc<Self>, py: Python<'_>, loop_obj: Py<PyAny>) -> PyResult<()> {
         {
@@ -784,11 +820,20 @@ impl LoopCore {
         state.stopping = false;
     }
 
+    /// Requests a graceful stop of the active run session.
+    ///
+    /// Already-ready callbacks are still processed according to asyncio's
+    /// stop semantics before `run_forever` returns.
     pub fn schedule_stop(&self) -> Result<(), LoopCoreError> {
         profiling::scope!("LoopCore::schedule_stop");
         self.send_command(LoopCommand::RequestStop)
     }
 
+    /// Permanently closes the loop and joins its dispatcher thread.
+    ///
+    /// Closing is idempotent, but an actively running loop returns
+    /// `LoopCoreError::Running`. Tracked I/O tasks are cancelled before the
+    /// on-thread runtime is dropped.
     pub fn close(&self) -> Result<(), LoopCoreError> {
         profiling::scope!("LoopCore::close");
         {
@@ -839,6 +884,10 @@ impl LoopCore {
 }
 
 impl LoopCore {
+    /// Dispatches an asyncio error-context dictionary to the configured handler.
+    ///
+    /// Falls back to [`LoopCore::default_exception_handler`] when no custom
+    /// handler is installed.
     pub fn call_exception_handler(
         &self,
         py: Python<'_>,
@@ -865,6 +914,7 @@ impl LoopCore {
         self.default_exception_handler(py, context)
     }
 
+    /// Writes an unhandled callback error and traceback to Python's `sys.stderr`.
     pub fn default_exception_handler(&self, py: Python<'_>, context: Py<PyAny>) -> PyResult<()> {
         let sys = py.import("sys")?;
         let stderr = sys.getattr("stderr")?;
@@ -886,6 +936,10 @@ impl LoopCore {
         Ok(())
     }
 
+    /// Invokes one ready callback and converts callback failures into loop errors.
+    ///
+    /// Returns a secondary error only when reporting the original callback
+    /// failure through the exception handler also fails.
     pub fn execute_ready(
         &self,
         py: Python<'_>,

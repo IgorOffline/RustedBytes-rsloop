@@ -49,6 +49,7 @@ const MAX_TIMER_DELAY_SECS: f64 = 100.0 * 365.0 * 24.0 * 60.0 * 60.0;
 #[pyclass(subclass, module = "rsloop._loop", weakref)]
 /// Python-visible event loop; scheduling and lifecycle state live in `LoopCore`.
 pub struct PyLoop {
+    /// Shared scheduling, lifecycle, and runtime state for this loop.
     pub core: Arc<LoopCore>,
 }
 
@@ -88,6 +89,10 @@ impl PyLoop {
 }
 
 #[pyfunction]
+/// Creates a new Python-visible rsloop event loop.
+///
+/// The returned loop is not installed as the current event loop and does not
+/// start running until Python calls `run_forever()` or `run_until_complete()`.
 pub fn new_event_loop(py: Python<'_>) -> PyResult<Py<PyLoop>> {
     Py::new(py, PyLoop::new())
 }

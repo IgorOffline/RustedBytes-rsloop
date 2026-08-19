@@ -248,13 +248,20 @@ impl Drop for PendingTlsHandshake {
     }
 }
 
+/// Python-visible owner of listening sockets and accept tasks.
+///
+/// Closing a server stops new accepts; `wait_closed()` additionally waits for
+/// accept workers and active connections to finish.
 #[pyclass(name = "Server", module = "rsloop._loop")]
 pub struct PyServer {
+    /// Shared listeners, accept workers, and connection counters.
     pub core: Arc<ServerCore>,
 }
 
+/// Python-visible asyncio transport for a stream socket or pipe.
 #[pyclass(name = "StreamTransport", module = "rsloop._loop")]
 pub struct PyStreamTransport {
+    /// Shared ordered event queues, protocol state, and I/O workers.
     pub core: Arc<StreamTransportCore>,
 }
 
