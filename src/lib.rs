@@ -4,7 +4,7 @@
 //!
 //! Most users install `rsloop` as a Python package and interact with its
 //! `asyncio`-compatible classes. The Rust crate is also linkable by downstream
-//! PyO3 extensions: use [`rust_async`] to turn Rust futures into Python
+//! `PyO3` extensions: use [`rust_async`] to turn Rust futures into Python
 //! awaitables that inherit the currently running rsloop event loop and Python
 //! [`contextvars`](https://docs.python.org/3/library/contextvars.html) context.
 //!

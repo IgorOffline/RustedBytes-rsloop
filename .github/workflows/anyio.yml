@@ -1,30 +1,6 @@
 name: AnyIO upstream test suite
 
 on:
-  push:
-    branches:
-      - master
-    paths:
-      - .github/workflows/anyio.yml
-      - Cargo.lock
-      - Cargo.toml
-      - pyproject.toml
-      - python/**
-      - scripts/prepare_anyio_rsloop_tests.py
-      - src/**
-      - vendor/**
-  pull_request:
-    paths:
-      - .github/workflows/anyio.yml
-      - Cargo.lock
-      - Cargo.toml
-      - pyproject.toml
-      - python/**
-      - scripts/prepare_anyio_rsloop_tests.py
-      - src/**
-      - vendor/**
-  schedule:
-    - cron: "17 6 * * 1"
   workflow_dispatch:
     inputs:
       anyio_ref:
