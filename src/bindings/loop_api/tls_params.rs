@@ -15,6 +15,35 @@ use crate::transport::tls::{
     ClientTlsSettings, ServerTlsSettings, client_tls_settings, server_tls_settings,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TlsValidationError {
+    ServerHostname,
+    HandshakeTimeout,
+    ShutdownTimeout,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TlsValidationInputs {
+    has_ssl: bool,
+    has_server_hostname: bool,
+    has_handshake_timeout: bool,
+    has_shutdown_timeout: bool,
+}
+
+fn tls_validation_error(inputs: TlsValidationInputs) -> Option<TlsValidationError> {
+    if inputs.has_ssl {
+        None
+    } else if inputs.has_server_hostname {
+        Some(TlsValidationError::ServerHostname)
+    } else if inputs.has_handshake_timeout {
+        Some(TlsValidationError::HandshakeTimeout)
+    } else if inputs.has_shutdown_timeout {
+        Some(TlsValidationError::ShutdownTimeout)
+    } else {
+        None
+    }
+}
+
 /// The TLS keyword group as it arrives from Python.
 pub(super) struct TlsParams {
     pub(super) ssl: Option<Py<PyAny>>,
@@ -46,25 +75,24 @@ impl TlsParams {
     /// what the individual methods used to do, so the reported error for a call
     /// that misuses several keywords at once does not change.
     pub(super) fn validate(&self) -> PyResult<()> {
-        if self.ssl.is_some() {
-            return Ok(());
-        }
-        if self.server_hostname.is_some() {
-            return Err(PyValueError::new_err(
+        let error = tls_validation_error(TlsValidationInputs {
+            has_ssl: self.ssl.is_some(),
+            has_server_hostname: self.server_hostname.is_some(),
+            has_handshake_timeout: self.handshake_timeout.is_some(),
+            has_shutdown_timeout: self.shutdown_timeout.is_some(),
+        });
+        match error {
+            None => Ok(()),
+            Some(TlsValidationError::ServerHostname) => Err(PyValueError::new_err(
                 "server_hostname is only meaningful with ssl",
-            ));
-        }
-        if self.handshake_timeout.is_some() {
-            return Err(PyValueError::new_err(
+            )),
+            Some(TlsValidationError::HandshakeTimeout) => Err(PyValueError::new_err(
                 "ssl_handshake_timeout is only meaningful with ssl",
-            ));
-        }
-        if self.shutdown_timeout.is_some() {
-            return Err(PyValueError::new_err(
+            )),
+            Some(TlsValidationError::ShutdownTimeout) => Err(PyValueError::new_err(
                 "ssl_shutdown_timeout is only meaningful with ssl",
-            ));
+            )),
         }
-        Ok(())
     }
 
     /// Client-side settings, or `None` when the caller passed no `ssl`.
@@ -102,6 +130,38 @@ impl TlsParams {
         py: Python<'_>,
     ) -> PyResult<Option<Arc<ServerTlsSettings>>> {
         Ok(self.server_settings(py)?.map(Arc::new))
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{TlsValidationError, TlsValidationInputs, tls_validation_error};
+
+    #[kani::proof]
+    fn core_tls_validation_preserves_error_precedence() {
+        let ssl: bool = kani::any();
+        let hostname: bool = kani::any();
+        let handshake: bool = kani::any();
+        let shutdown: bool = kani::any();
+
+        let error = tls_validation_error(TlsValidationInputs {
+            has_ssl: ssl,
+            has_server_hostname: hostname,
+            has_handshake_timeout: handshake,
+            has_shutdown_timeout: shutdown,
+        });
+        let expected = if ssl {
+            None
+        } else if hostname {
+            Some(TlsValidationError::ServerHostname)
+        } else if handshake {
+            Some(TlsValidationError::HandshakeTimeout)
+        } else if shutdown {
+            Some(TlsValidationError::ShutdownTimeout)
+        } else {
+            None
+        };
+        assert_eq!(error, expected);
     }
 }
 

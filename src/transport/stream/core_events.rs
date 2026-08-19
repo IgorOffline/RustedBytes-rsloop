@@ -43,6 +43,48 @@ use super::{
 use crate::context::ensure_running_loop;
 use crate::engine::{LoopCommand, LoopTransportCommand};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadEventKind {
+    Data,
+    Eof,
+    Lost,
+    Pause,
+    Resume,
+}
+
+fn read_event_kind(event: &PendingReadEvent) -> ReadEventKind {
+    match event {
+        PendingReadEvent::Data(_) => ReadEventKind::Data,
+        PendingReadEvent::Eof => ReadEventKind::Eof,
+        PendingReadEvent::ConnectionLost(_) => ReadEventKind::Lost,
+        PendingReadEvent::PauseWriting => ReadEventKind::Pause,
+        PendingReadEvent::ResumeWriting => ReadEventKind::Resume,
+    }
+}
+
+fn transition_read_event_state(state: u8, event: ReadEventKind) -> Option<u8> {
+    match event {
+        ReadEventKind::Data if state == READ_EVENT_OPEN => Some(READ_EVENT_OPEN),
+        ReadEventKind::Eof if state == READ_EVENT_OPEN => Some(READ_EVENT_EOF),
+        ReadEventKind::Lost if state != READ_EVENT_LOST => Some(READ_EVENT_LOST),
+        ReadEventKind::Pause | ReadEventKind::Resume if state != READ_EVENT_LOST => Some(state),
+        _ => None,
+    }
+}
+
+fn can_coalesce_read_data(current: usize, incoming: usize, limit: usize) -> bool {
+    incoming <= limit.saturating_sub(current)
+}
+
+fn read_drain_budget_reached(
+    drained_events: usize,
+    drained_bytes: usize,
+    event_budget: usize,
+    byte_budget: usize,
+) -> bool {
+    drained_events >= event_budget || drained_bytes >= byte_budget
+}
+
 impl StreamTransportCore {
     #[cfg(windows)]
     #[inline]
@@ -216,30 +258,18 @@ impl StreamTransportCore {
             .lock()
             .expect("poisoned pending read queue");
         let read_event_state = self.read_event_state.load(Ordering::Acquire);
-        let reject = match &event {
-            PendingReadEvent::Data(_) | PendingReadEvent::Eof => {
-                read_event_state != READ_EVENT_OPEN
-            }
-            PendingReadEvent::ConnectionLost(_) => read_event_state == READ_EVENT_LOST,
-            PendingReadEvent::PauseWriting | PendingReadEvent::ResumeWriting => {
-                read_event_state == READ_EVENT_LOST
-            }
-        };
-        if reject {
+        let Some(next_read_event_state) =
+            transition_read_event_state(read_event_state, read_event_kind(&event))
+        else {
             drop(queue);
             if let PendingReadEvent::Data(data) = event {
                 self.read_buffer_pool.release(data);
             }
             return;
-        }
-        match &event {
-            PendingReadEvent::Eof => self
-                .read_event_state
-                .store(READ_EVENT_EOF, Ordering::Release),
-            PendingReadEvent::ConnectionLost(_) => self
-                .read_event_state
-                .store(READ_EVENT_LOST, Ordering::Release),
-            _ => {}
+        };
+        if next_read_event_state != read_event_state {
+            self.read_event_state
+                .store(next_read_event_state, Ordering::Release);
         }
         let data_len = match &event {
             PendingReadEvent::Data(data) => data.len(),
@@ -339,8 +369,11 @@ impl StreamTransportCore {
                         } else {
                             match &mut pending_data {
                                 Some(buffer)
-                                    if buffer.len() + data.len()
-                                        <= MAX_PENDING_READ_COALESCE_BYTES =>
+                                    if can_coalesce_read_data(
+                                        buffer.len(),
+                                        data.len(),
+                                        MAX_PENDING_READ_COALESCE_BYTES,
+                                    ) =>
                                 {
                                     buffer.extend(&data);
                                     self.read_buffer_pool.release(data);
@@ -376,9 +409,12 @@ impl StreamTransportCore {
                             }
                         }
 
-                        if (drained_events >= MAX_READ_EVENTS_PER_DRAIN
-                            || drained_bytes >= MAX_READ_BYTES_PER_DRAIN)
-                            && self.reschedule_pending_read_events(&mut drained)
+                        if read_drain_budget_reached(
+                            drained_events,
+                            drained_bytes,
+                            MAX_READ_EVENTS_PER_DRAIN,
+                            MAX_READ_BYTES_PER_DRAIN,
+                        ) && self.reschedule_pending_read_events(&mut drained)
                         {
                             self.flush_pending_data_with_py(py, &mut pending_data, fast_path)?;
                             return Ok(());
@@ -507,6 +543,160 @@ impl StreamTransportCore {
                     Arc::clone(self),
                 )));
         true
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{
+        READ_EVENT_EOF, READ_EVENT_LOST, READ_EVENT_OPEN, ReadEventKind, can_coalesce_read_data,
+        read_drain_budget_reached, transition_read_event_state,
+    };
+
+    const MODEL_EVENTS: usize = 6;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ModelEvent {
+        kind: ReadEventKind,
+        byte: u8,
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn extended_pending_read_events_preserve_order_and_accounting() {
+        let operations: [u8; MODEL_EVENTS] = kani::any();
+        let bytes: [u8; MODEL_EVENTS] = kani::any();
+        let mut queue = [ModelEvent {
+            kind: ReadEventKind::Pause,
+            byte: 0,
+        }; MODEL_EVENTS];
+        let mut queue_len = 0;
+        let mut state = READ_EVENT_OPEN;
+        let mut pending_read_bytes = 0;
+        let mut accepted_data = [0_u8; MODEL_EVENTS];
+        let mut accepted_data_len = 0;
+        let mut saw_eof = false;
+        let mut saw_loss = false;
+
+        for index in 0..MODEL_EVENTS {
+            let kind = match operations[index] % 5 {
+                0 => ReadEventKind::Data,
+                1 => ReadEventKind::Eof,
+                2 => ReadEventKind::Lost,
+                3 => ReadEventKind::Pause,
+                _ => ReadEventKind::Resume,
+            };
+            let previous_state = state;
+            let Some(next_state) = transition_read_event_state(state, kind) else {
+                if matches!(kind, ReadEventKind::Pause | ReadEventKind::Resume) {
+                    assert_eq!(previous_state, READ_EVENT_LOST);
+                }
+                if matches!(kind, ReadEventKind::Data | ReadEventKind::Eof) {
+                    assert_ne!(previous_state, READ_EVENT_OPEN);
+                }
+                continue;
+            };
+
+            assert!(!saw_loss);
+            if saw_eof {
+                assert!(!matches!(kind, ReadEventKind::Data | ReadEventKind::Eof));
+            }
+            queue[queue_len] = ModelEvent {
+                kind,
+                byte: bytes[index],
+            };
+            queue_len += 1;
+            state = next_state;
+            match kind {
+                ReadEventKind::Data => {
+                    pending_read_bytes += 1;
+                    accepted_data[accepted_data_len] = bytes[index];
+                    accepted_data_len += 1;
+                }
+                ReadEventKind::Eof => {
+                    assert!(!saw_eof);
+                    saw_eof = true;
+                    assert_eq!(state, READ_EVENT_EOF);
+                }
+                ReadEventKind::Lost => {
+                    saw_loss = true;
+                    assert_eq!(state, READ_EVENT_LOST);
+                }
+                ReadEventKind::Pause | ReadEventKind::Resume => {
+                    assert_eq!(state, previous_state);
+                }
+            }
+        }
+
+        let event_budget = usize::from(kani::any::<u8>() % 3) + 1;
+        let byte_budget = usize::from(kani::any::<u8>() % 3) + 1;
+        let coalesce_limit = usize::from(kani::any::<u8>() % 4);
+        let mut cursor = 0;
+        let mut output = [ModelEvent {
+            kind: ReadEventKind::Pause,
+            byte: 0,
+        }; MODEL_EVENTS];
+        let mut output_len = 0;
+        let mut output_data = [0_u8; MODEL_EVENTS];
+        let mut output_data_len = 0;
+        let mut coalesced_len = 0;
+
+        while cursor < queue_len {
+            let mut drained_events = 0;
+            let mut drained_bytes = 0;
+            loop {
+                let event = queue[cursor];
+                cursor += 1;
+                output[output_len] = event;
+                output_len += 1;
+
+                match event.kind {
+                    ReadEventKind::Data => {
+                        if !can_coalesce_read_data(coalesced_len, 1, coalesce_limit) {
+                            coalesced_len = 0;
+                        }
+                        coalesced_len += 1;
+                        output_data[output_data_len] = event.byte;
+                        output_data_len += 1;
+                        pending_read_bytes -= 1;
+                        drained_events += 1;
+                        drained_bytes += 1;
+                        assert_eq!(pending_read_bytes, accepted_data_len - output_data_len);
+                        if read_drain_budget_reached(
+                            drained_events,
+                            drained_bytes,
+                            event_budget,
+                            byte_budget,
+                        ) && cursor < queue_len
+                        {
+                            break;
+                        }
+                    }
+                    ReadEventKind::Eof
+                    | ReadEventKind::Lost
+                    | ReadEventKind::Pause
+                    | ReadEventKind::Resume => {
+                        coalesced_len = 0;
+                    }
+                }
+                if cursor == queue_len {
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(pending_read_bytes, 0);
+        assert_eq!(output_len, queue_len);
+        for index in 0..queue_len {
+            assert_eq!(output[index], queue[index]);
+        }
+        assert_eq!(output_data_len, accepted_data_len);
+        for index in 0..accepted_data_len {
+            assert_eq!(output_data[index], accepted_data[index]);
+        }
+        kani::cover!(saw_eof);
+        kani::cover!(saw_loss);
+        kani::cover!(output_data_len > 1);
     }
 }
 

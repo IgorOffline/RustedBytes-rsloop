@@ -44,6 +44,75 @@ fn is_write_batch_candidate(len: usize) -> bool {
     len > SMALL_WRITE_COALESCE_MIN_BYTES && len <= SMALL_WRITE_COALESCE_MAX_BYTES
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WriteBufferSignal {
+    None,
+    Pause,
+    Resume,
+}
+
+fn enqueue_write_buffer(
+    state: &mut super::StreamWriteBufferState,
+    len: usize,
+    cap: usize,
+) -> Result<WriteBufferSignal, ()> {
+    if len == 0 {
+        return Ok(WriteBufferSignal::None);
+    }
+    if len > cap.saturating_sub(state.size) {
+        return Err(());
+    }
+
+    state.size += len;
+    if state.size > state.high_water && !state.protocol_paused {
+        state.protocol_paused = true;
+        return Ok(WriteBufferSignal::Pause);
+    }
+    Ok(WriteBufferSignal::None)
+}
+
+fn drain_write_buffer(state: &mut super::StreamWriteBufferState, len: usize) -> WriteBufferSignal {
+    state.size = state.size.saturating_sub(len);
+    if state.protocol_paused && state.size <= state.low_water {
+        state.protocol_paused = false;
+        WriteBufferSignal::Resume
+    } else {
+        WriteBufferSignal::None
+    }
+}
+
+fn clear_write_buffer_state(
+    state: &mut super::StreamWriteBufferState,
+    resume_protocol: bool,
+) -> WriteBufferSignal {
+    let signal = if resume_protocol && state.protocol_paused {
+        WriteBufferSignal::Resume
+    } else {
+        WriteBufferSignal::None
+    };
+    state.size = 0;
+    state.protocol_paused = false;
+    signal
+}
+
+pub(super) fn reconcile_write_buffer_limits(
+    state: &mut super::StreamWriteBufferState,
+    low_water: usize,
+    high_water: usize,
+) -> WriteBufferSignal {
+    state.low_water = low_water;
+    state.high_water = high_water;
+    if state.size > high_water && !state.protocol_paused {
+        state.protocol_paused = true;
+        WriteBufferSignal::Pause
+    } else if state.protocol_paused && state.size <= low_water {
+        state.protocol_paused = false;
+        WriteBufferSignal::Resume
+    } else {
+        WriteBufferSignal::None
+    }
+}
+
 impl StreamTransportCore {
     #[inline]
     pub(super) fn write_backpressure_active(&self) -> bool {
@@ -468,25 +537,15 @@ impl StreamTransportCore {
             return Ok(false);
         }
 
+        let cap = max_write_buffer_size();
         let mut state = self.state.lock().expect("poisoned transport state");
-        if len > max_write_buffer_size().saturating_sub(state.write_buffer.size) {
-            return Err(io::Error::new(
+        match enqueue_write_buffer(&mut state.write_buffer, len, cap) {
+            Ok(signal) => Ok(signal == WriteBufferSignal::Pause),
+            Err(()) => Err(io::Error::new(
                 io::ErrorKind::OutOfMemory,
-                format!(
-                    "transport write buffer exceeds {} bytes",
-                    max_write_buffer_size()
-                ),
-            ));
+                format!("transport write buffer exceeds {cap} bytes"),
+            )),
         }
-        state.write_buffer.size = state.write_buffer.size.saturating_add(len);
-        if state.write_buffer.size > state.write_buffer.high_water
-            && !state.write_buffer.protocol_paused
-        {
-            state.write_buffer.protocol_paused = true;
-            return Ok(true);
-        }
-
-        Ok(false)
     }
 
     pub(super) fn record_write_buffer_drained(self: &Arc<Self>, len: usize) {
@@ -496,15 +555,7 @@ impl StreamTransportCore {
 
         let should_resume = {
             let mut state = self.state.lock().expect("poisoned transport state");
-            state.write_buffer.size = state.write_buffer.size.saturating_sub(len);
-            if state.write_buffer.protocol_paused
-                && state.write_buffer.size <= state.write_buffer.low_water
-            {
-                state.write_buffer.protocol_paused = false;
-                true
-            } else {
-                false
-            }
+            drain_write_buffer(&mut state.write_buffer, len) == WriteBufferSignal::Resume
         };
 
         if should_resume {
@@ -515,14 +566,124 @@ impl StreamTransportCore {
     pub(super) fn clear_write_buffer(self: &Arc<Self>, resume_protocol: bool) {
         let should_resume = {
             let mut state = self.state.lock().expect("poisoned transport state");
-            let should_resume = resume_protocol && state.write_buffer.protocol_paused;
-            state.write_buffer.size = 0;
-            state.write_buffer.protocol_paused = false;
-            should_resume
+            clear_write_buffer_state(&mut state.write_buffer, resume_protocol)
+                == WriteBufferSignal::Resume
         };
 
         if should_resume {
             self.notify_resume_writing();
+        }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{
+        WriteBufferSignal, clear_write_buffer_state, drain_write_buffer, enqueue_write_buffer,
+        reconcile_write_buffer_limits,
+    };
+    use crate::transport::stream::StreamWriteBufferState;
+
+    const MODEL_CAP: usize = 32;
+    const MODEL_OPERATIONS: usize = 6;
+
+    fn assert_valid(state: &StreamWriteBufferState) {
+        assert!(state.low_water <= state.high_water);
+        assert!(state.size <= MODEL_CAP);
+        if state.protocol_paused {
+            assert!(state.size > state.low_water);
+        } else {
+            assert!(state.size <= state.high_water);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn extended_write_accounting_preserves_lifecycle_invariants() {
+        let low_water = usize::from(kani::any::<u8>() % 16);
+        let high_water = low_water + usize::from(kani::any::<u8>()) % (MODEL_CAP - low_water + 1);
+        let size = usize::from(kani::any::<u8>()) % (MODEL_CAP + 1);
+        let protocol_paused: bool = kani::any();
+        kani::assume(
+            (protocol_paused && size > low_water) || (!protocol_paused && size <= high_water),
+        );
+
+        let mut state = StreamWriteBufferState {
+            size,
+            high_water,
+            low_water,
+            protocol_paused,
+        };
+        let operations: [u8; MODEL_OPERATIONS] = kani::any();
+        let amounts: [u8; MODEL_OPERATIONS] = kani::any();
+        let secondary: [u8; MODEL_OPERATIONS] = kani::any();
+
+        for index in 0..MODEL_OPERATIONS {
+            assert_valid(&state);
+            let before = state;
+            match operations[index] % 5 {
+                0 => {
+                    let amount = usize::from(amounts[index] % 17);
+                    match enqueue_write_buffer(&mut state, amount, MODEL_CAP) {
+                        Ok(signal) => {
+                            assert_eq!(state.size, before.size + amount);
+                            assert_eq!(
+                                signal == WriteBufferSignal::Pause,
+                                amount > 0
+                                    && before.size + amount > before.high_water
+                                    && !before.protocol_paused
+                            );
+                            kani::cover!(signal == WriteBufferSignal::Pause);
+                        }
+                        Err(()) => {
+                            assert_eq!(state, before);
+                            assert!(amount > MODEL_CAP - before.size);
+                            kani::cover!(true);
+                        }
+                    }
+                }
+                1 => {
+                    let amount = usize::from(amounts[index]);
+                    let signal = drain_write_buffer(&mut state, amount);
+                    let expected_size = before.size.saturating_sub(amount);
+                    assert_eq!(state.size, expected_size);
+                    assert_eq!(
+                        signal == WriteBufferSignal::Resume,
+                        before.protocol_paused && expected_size <= before.low_water
+                    );
+                    kani::cover!(signal == WriteBufferSignal::Resume);
+                }
+                2 => {
+                    let resume_protocol = secondary[index] & 1 == 1;
+                    let signal = clear_write_buffer_state(&mut state, resume_protocol);
+                    assert_eq!(state.size, 0);
+                    assert!(!state.protocol_paused);
+                    assert_eq!(
+                        signal == WriteBufferSignal::Resume,
+                        resume_protocol && before.protocol_paused
+                    );
+                }
+                3 => {
+                    let low = usize::from(amounts[index] % 16);
+                    let high = low + usize::from(secondary[index]) % (MODEL_CAP - low + 1);
+                    let signal = reconcile_write_buffer_limits(&mut state, low, high);
+                    let expected_pause = before.size > high && !before.protocol_paused;
+                    let expected_resume =
+                        !expected_pause && before.protocol_paused && before.size <= low;
+                    assert_eq!(signal == WriteBufferSignal::Pause, expected_pause);
+                    assert_eq!(signal == WriteBufferSignal::Resume, expected_resume);
+                    kani::cover!(signal == WriteBufferSignal::Pause);
+                    kani::cover!(signal == WriteBufferSignal::Resume);
+                }
+                _ => {
+                    // Connection loss clears accounting without invoking resume_writing.
+                    let signal = clear_write_buffer_state(&mut state, false);
+                    assert_eq!(signal, WriteBufferSignal::None);
+                    assert_eq!(state.size, 0);
+                    assert!(!state.protocol_paused);
+                }
+            }
+            assert_valid(&state);
         }
     }
 }

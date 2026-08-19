@@ -318,6 +318,7 @@ fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 }
 
 /// Result of one pass of the `readuntil()` scan over the buffered bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UntilScan {
     Found {
         match_start: usize,
@@ -485,7 +486,7 @@ impl UntilReadState {
 
 #[cfg(kani)]
 mod verification {
-    use super::{ReadBuffer, Separators, UntilReadState, UntilScan, find_from};
+    use super::{ReadBuffer, Separators, UntilReadState, UntilScan, exact_fill_amount, find_from};
     use crate::verification::MAX_BYTES;
 
     #[kani::proof]
@@ -537,6 +538,210 @@ mod verification {
             UntilScan::NeedMore => assert!(expected_offset <= limit),
             UntilScan::Found { .. } => panic!("separator is absent from the input alphabet"),
         }
+    }
+
+    struct FixedReadBuffer {
+        bytes: [u8; MAX_BYTES],
+        len: usize,
+    }
+
+    impl FixedReadBuffer {
+        fn new() -> Self {
+            Self {
+                bytes: [0; MAX_BYTES],
+                len: 0,
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.len
+        }
+
+        fn unread(&self) -> &[u8] {
+            &self.bytes[..self.len]
+        }
+
+        fn push(&mut self, byte: u8) {
+            assert!(self.len < MAX_BYTES);
+            self.bytes[self.len] = byte;
+            self.len += 1;
+        }
+
+        fn consume(&mut self, amount: usize) {
+            let amount = amount.min(self.len);
+            for index in amount..self.len {
+                self.bytes[index - amount] = self.bytes[index];
+            }
+            self.len -= amount;
+        }
+    }
+
+    fn consume_into(
+        buffer: &mut FixedReadBuffer,
+        observed: &mut [u8; MAX_BYTES],
+        observed_len: &mut usize,
+        amount: usize,
+    ) {
+        let amount = amount.min(buffer.len());
+        for byte in &buffer.unread()[..amount] {
+            observed[*observed_len] = *byte;
+            *observed_len += 1;
+        }
+        buffer.consume(amount);
+    }
+
+    fn assert_conservation(
+        accepted: &[u8; MAX_BYTES],
+        accepted_len: usize,
+        observed: &[u8; MAX_BYTES],
+        observed_len: usize,
+        buffer: &FixedReadBuffer,
+    ) {
+        assert_eq!(accepted_len, observed_len + buffer.len());
+        for index in 0..accepted_len {
+            let actual = if index < observed_len {
+                observed[index]
+            } else {
+                buffer.unread()[index - observed_len]
+            };
+            assert_eq!(actual, accepted[index]);
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn extended_incremental_and_bulk_separator_scans_agree() {
+        const SEQUENCE_BYTES: usize = 4;
+        let data: [u8; SEQUENCE_BYTES] = kani::any();
+        let data_len = usize::from(kani::any::<u8>() % (SEQUENCE_BYTES as u8 + 1));
+        let data = &data[..data_len];
+        let mut bulk_state =
+            UntilReadState::new(Separators::single(b"aba"), false).expect("valid separator");
+        let bulk = bulk_state.scan(&data, usize::MAX);
+
+        let mut incremental_state =
+            UntilReadState::new(Separators::single(b"aba"), false).expect("valid separator");
+        let mut incremental = UntilScan::NeedMore;
+        for end in 1..=data.len() {
+            incremental = incremental_state.scan(&data[..end], usize::MAX);
+            if matches!(incremental, UntilScan::Found { .. }) {
+                break;
+            }
+        }
+        assert_eq!(incremental, bulk);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn core_overlapping_separator_chooses_the_earliest_match() {
+        let mut state =
+            UntilReadState::new(Separators::single(b"aba"), false).expect("valid separator");
+        assert_eq!(
+            state.scan(b"ababa", usize::MAX),
+            UntilScan::Found {
+                match_start: 0,
+                match_end: 3,
+            }
+        );
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn extended_fast_reader_operations_conserve_unread_bytes() {
+        const OPERATIONS: usize = 4;
+        let operations: [u8; OPERATIONS] = kani::any();
+        let values: [u8; OPERATIONS] = kani::any();
+        let mut accepted = [0_u8; MAX_BYTES];
+        let mut accepted_len = 0;
+        let mut observed = [0_u8; MAX_BYTES];
+        let mut observed_len = 0;
+        let mut buffer = FixedReadBuffer::new();
+        let mut eof = false;
+        let mut connection_lost = false;
+
+        for index in 0..OPERATIONS {
+            match operations[index] % 7 {
+                0 => {
+                    if !eof && !connection_lost && accepted_len < MAX_BYTES {
+                        let byte = values[index];
+                        buffer.push(byte);
+                        accepted[accepted_len] = byte;
+                        accepted_len += 1;
+                    }
+                }
+                1 => {
+                    if !connection_lost {
+                        consume_into(
+                            &mut buffer,
+                            &mut observed,
+                            &mut observed_len,
+                            usize::from(values[index] % 4),
+                        );
+                    }
+                }
+                2 => {
+                    if !connection_lost {
+                        let exact = usize::from(values[index] % 3) + 1;
+                        if buffer.len() >= exact {
+                            consume_into(&mut buffer, &mut observed, &mut observed_len, exact);
+                        } else if eof {
+                            let remaining = buffer.len();
+                            consume_into(&mut buffer, &mut observed, &mut observed_len, remaining);
+                        }
+                    }
+                }
+                3 => {
+                    if !connection_lost {
+                        let mut state = UntilReadState::new(Separators::single(b"aba"), false)
+                            .expect("valid separator");
+                        match state.scan(buffer.unread(), usize::MAX) {
+                            UntilScan::Found { match_end, .. } => consume_into(
+                                &mut buffer,
+                                &mut observed,
+                                &mut observed_len,
+                                match_end,
+                            ),
+                            UntilScan::NeedMore if eof => {
+                                let remaining = buffer.len();
+                                consume_into(
+                                    &mut buffer,
+                                    &mut observed,
+                                    &mut observed_len,
+                                    remaining,
+                                );
+                            }
+                            UntilScan::NeedMore | UntilScan::OverLimit { .. } => {}
+                        }
+                    }
+                }
+                4 => eof = true,
+                5 => {
+                    // Cancelling a pending read must not mutate buffered data.
+                    let before_len = buffer.len();
+                    assert_eq!(buffer.len(), before_len);
+                }
+                _ => {
+                    // Connection loss resolves the waiter with an exception but
+                    // does not duplicate or consume buffered bytes.
+                    connection_lost = true;
+                }
+            }
+            assert_conservation(&accepted, accepted_len, &observed, observed_len, &buffer);
+        }
+    }
+
+    #[kani::proof]
+    fn core_exact_read_fill_range_is_initialized_and_in_bounds() {
+        let buffer_len: usize = kani::any();
+        let filled: usize = kani::any();
+        let expected: usize = kani::any();
+        kani::assume(filled <= expected);
+
+        let amount = exact_fill_amount(buffer_len, filled, expected);
+        assert!(amount <= buffer_len);
+        assert!(amount <= expected - filled);
+        assert!(filled.checked_add(amount).is_some());
+        assert!(filled + amount <= expected);
     }
 }
 
@@ -852,6 +1057,11 @@ struct ExactReadAccumulator {
     expected: usize,
 }
 
+fn exact_fill_amount(buffer_len: usize, filled: usize, expected: usize) -> usize {
+    debug_assert!(filled <= expected);
+    buffer_len.min(expected - filled)
+}
+
 impl ExactReadAccumulator {
     fn new(py: Python<'_>, expected: usize) -> PyResult<Self> {
         let expected_size = ffi::Py_ssize_t::try_from(expected)
@@ -876,7 +1086,7 @@ impl ExactReadAccumulator {
     }
 
     fn fill_from(&mut self, buffer: &mut ReadBuffer) {
-        let amount = buffer.len().min(self.expected - self.filled);
+        let amount = exact_fill_amount(buffer.len(), self.filled, self.expected);
         if amount == 0 {
             return;
         }

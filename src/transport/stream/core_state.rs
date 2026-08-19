@@ -13,6 +13,7 @@ use std::time::Duration;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::core_write::{WriteBufferSignal, reconcile_write_buffer_limits};
 use super::io_targets::TaskedDirectWriter;
 use super::protocol::build_protocol_callbacks;
 use super::tuning::DEFAULT_WRITE_BUFFER_HIGH_WATER;
@@ -260,21 +261,11 @@ impl StreamTransportCore {
                 )));
             };
 
-            state.write_buffer.high_water = high;
-            state.write_buffer.low_water = low;
-
-            let should_pause = state.write_buffer.size > state.write_buffer.high_water
-                && !state.write_buffer.protocol_paused;
-            let should_resume = state.write_buffer.protocol_paused
-                && state.write_buffer.size <= state.write_buffer.low_water;
-
-            if should_pause {
-                state.write_buffer.protocol_paused = true;
-            } else if should_resume {
-                state.write_buffer.protocol_paused = false;
+            match reconcile_write_buffer_limits(&mut state.write_buffer, low, high) {
+                WriteBufferSignal::Pause => (true, false),
+                WriteBufferSignal::Resume => (false, true),
+                WriteBufferSignal::None => (false, false),
             }
-
-            (should_pause, should_resume)
         };
 
         if should_pause {

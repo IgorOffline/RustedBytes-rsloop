@@ -147,6 +147,7 @@ struct StreamTransportState {
     server: Option<Weak<ServerCore>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StreamWriteBufferState {
     size: usize,
     high_water: usize,

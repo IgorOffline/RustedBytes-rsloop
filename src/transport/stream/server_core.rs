@@ -36,6 +36,24 @@ use super::{
 use crate::context::{ensure_running_loop, run_in_context};
 use crate::engine::{LoopCommand, LoopIoCommand};
 
+fn reserve_tls_slot(current: usize, limit: usize, closed: bool) -> Option<usize> {
+    (!closed && current < limit).then_some(current + 1)
+}
+
+#[cfg(kani)]
+fn release_tls_slot(current: usize) -> Option<usize> {
+    current.checked_sub(1)
+}
+
+fn close_server_flags(closed: &mut bool, serving: &mut bool) -> bool {
+    if *closed {
+        return false;
+    }
+    *closed = true;
+    *serving = false;
+    true
+}
+
 impl ServerCore {
     pub(super) fn close_python_sockets(&self) {
         let _ = Python::try_attach(|py| -> PyResult<()> {
@@ -100,7 +118,7 @@ impl ServerCore {
         let reserved = self.pending_tls_handshakes.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
-            |current| (current < limit).then_some(current + 1),
+            |current| reserve_tls_slot(current, limit, false),
         );
         reserved.ok().map(|_| PendingTlsHandshake {
             server: Arc::clone(self),
@@ -110,11 +128,12 @@ impl ServerCore {
     pub(super) fn close(&self) {
         {
             let mut state = self.state.lock().expect("poisoned server state");
-            if state.closed {
+            let super::ServerState {
+                closed, serving, ..
+            } = &mut *state;
+            if !close_server_flags(closed, serving) {
                 return;
             }
-            state.closed = true;
-            state.serving = false;
             state.listeners.clear();
         }
 
@@ -251,6 +270,72 @@ impl ServerCore {
                 ));
             }
         }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{close_server_flags, release_tls_slot, reserve_tls_slot};
+
+    const MODEL_OPERATIONS: usize = 6;
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn extended_tls_admission_and_server_close_preserve_bounds() {
+        let limit = usize::from(kani::any::<u8>() % 5);
+        let operations: [u8; MODEL_OPERATIONS] = kani::any();
+        let mut pending = 0_usize;
+        let mut closed = false;
+        let mut serving: bool = kani::any();
+        let mut listeners = usize::from(kani::any::<u8>() % 4);
+
+        for operation in operations {
+            match operation % 4 {
+                0 => {
+                    let next = reserve_tls_slot(pending, limit, closed);
+                    if let Some(next) = next {
+                        assert!(!closed);
+                        assert!(pending < limit);
+                        pending = next;
+                    } else {
+                        assert!(closed || pending >= limit);
+                    }
+                }
+                1 => {
+                    if let Some(next) = release_tls_slot(pending) {
+                        assert!(next < pending);
+                        pending = next;
+                    } else {
+                        assert_eq!(pending, 0);
+                    }
+                }
+                2 => {
+                    let changed = close_server_flags(&mut closed, &mut serving);
+                    if changed {
+                        listeners = 0;
+                    } else {
+                        assert!(closed);
+                    }
+                    assert!(closed);
+                    assert!(!serving);
+                    assert_eq!(listeners, 0);
+                }
+                _ => {
+                    if !closed && !serving {
+                        serving = true;
+                        listeners = 0;
+                    }
+                }
+            }
+            assert!(pending <= limit);
+            if closed {
+                assert!(reserve_tls_slot(pending, limit, closed).is_none());
+                assert!(!serving);
+                assert_eq!(listeners, 0);
+            }
+        }
+        kani::cover!(pending == limit);
+        kani::cover!(closed && pending > 0);
     }
 }
 

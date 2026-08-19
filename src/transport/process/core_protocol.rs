@@ -16,6 +16,32 @@ use pyo3::prelude::*;
 
 use super::{PendingProcessEvent, ProcessTransportCore, PyProcessTransport};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessExitDecision {
+    Duplicate,
+    First { should_finish: bool },
+}
+
+fn process_connection_lost_eligible(exited: bool, open_pipes_empty: bool) -> bool {
+    exited && open_pipes_empty
+}
+
+fn record_process_exit(
+    exited: &mut bool,
+    returncode: &mut Option<i32>,
+    open_pipes_empty: bool,
+    code: i32,
+) -> ProcessExitDecision {
+    if *exited {
+        return ProcessExitDecision::Duplicate;
+    }
+    *exited = true;
+    *returncode = Some(code);
+    ProcessExitDecision::First {
+        should_finish: process_connection_lost_eligible(true, open_pipes_empty),
+    }
+}
+
 impl ProcessTransportCore {
     pub(super) fn connection_made(&self, transport: Py<PyProcessTransport>) -> PyResult<()> {
         self.call_in_loop_context(|py| {
@@ -92,9 +118,9 @@ impl ProcessTransportCore {
             if !state.open_pipes.remove(&fd) {
                 return Ok(());
             }
-            let exited = state.exited;
-            let empty = state.open_pipes.is_empty();
-            (exc, exited && empty)
+            let should_finish =
+                process_connection_lost_eligible(state.exited, state.open_pipes.is_empty());
+            (exc, should_finish)
         };
 
         if !self.loop_core.on_runtime_thread() {
@@ -145,9 +171,21 @@ impl ProcessTransportCore {
     pub(super) fn process_exited(self: &Arc<Self>, returncode: i32) -> PyResult<()> {
         let should_finish = {
             let mut state = self.state.lock().expect("poisoned process state");
-            state.returncode = Some(returncode);
-            state.exited = true;
-            state.open_pipes.is_empty()
+            let open_pipes_empty = state.open_pipes.is_empty();
+            let mut exited = state.exited;
+            let mut stored_returncode = state.returncode;
+            let decision = record_process_exit(
+                &mut exited,
+                &mut stored_returncode,
+                open_pipes_empty,
+                returncode,
+            );
+            state.exited = exited;
+            state.returncode = stored_returncode;
+            match decision {
+                ProcessExitDecision::Duplicate => return Ok(()),
+                ProcessExitDecision::First { should_finish } => should_finish,
+            }
         };
         self.exit_notify.notify_all();
 
@@ -202,5 +240,106 @@ impl ProcessTransportCore {
     pub(super) fn connection_lost(self: &Arc<Self>, exc: Option<PyErr>) -> PyResult<()> {
         let exc = exc.map(|err| Python::attach(|py| err.value(py).to_string()));
         self.connection_lost_message(exc)
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{ProcessExitDecision, process_connection_lost_eligible, record_process_exit};
+
+    const PIPE_COUNT: usize = 3;
+    const MODEL_OPERATIONS: usize = 6;
+
+    #[kani::proof]
+    #[kani::unwind(8)]
+    fn extended_subprocess_lifecycle_is_idempotent_and_order_independent() {
+        let operations: [u8; MODEL_OPERATIONS] = kani::any();
+        let returncodes: [i8; MODEL_OPERATIONS] = kani::any();
+        let mut open_pipes = (1_u8 << PIPE_COUNT) - 1;
+        let mut pipe_close_count = [0_u8; PIPE_COUNT];
+        let mut exited = false;
+        let mut returncode = None;
+        let mut process_exited_count = 0_u8;
+        let mut connection_lost_called = false;
+
+        for index in 0..MODEL_OPERATIONS {
+            if operations[index] % 5 < 4 {
+                let pipe = usize::from(operations[index] % 5);
+                let before = open_pipes;
+                if pipe < PIPE_COUNT {
+                    let bit = 1_u8 << pipe;
+                    if open_pipes & bit != 0 {
+                        open_pipes &= !bit;
+                        pipe_close_count[pipe] += 1;
+                    }
+                }
+                assert!(open_pipes == before || open_pipes.count_ones() + 1 == before.count_ones());
+            } else {
+                let before_exited = exited;
+                let before_returncode = returncode;
+                match record_process_exit(
+                    &mut exited,
+                    &mut returncode,
+                    open_pipes == 0,
+                    i32::from(returncodes[index]),
+                ) {
+                    ProcessExitDecision::Duplicate => {
+                        assert!(before_exited);
+                        assert_eq!(returncode, before_returncode);
+                    }
+                    ProcessExitDecision::First { should_finish } => {
+                        assert!(!before_exited);
+                        process_exited_count += 1;
+                        assert_eq!(
+                            should_finish,
+                            process_connection_lost_eligible(true, open_pipes == 0)
+                        );
+                    }
+                }
+            }
+
+            for count in pipe_close_count {
+                assert!(count <= 1);
+            }
+            assert!(process_exited_count <= 1);
+            let eligible = process_connection_lost_eligible(exited, open_pipes == 0);
+            if eligible {
+                connection_lost_called = true;
+            }
+            assert_eq!(eligible, exited && open_pipes == 0);
+            assert!(!connection_lost_called || eligible);
+        }
+
+        assert_eq!(process_exited_count, u8::from(exited));
+        if exited {
+            assert!(returncode.is_some());
+        } else {
+            assert!(returncode.is_none());
+        }
+        kani::cover!(exited && open_pipes != 0);
+        kani::cover!(connection_lost_called);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{ProcessExitDecision, process_connection_lost_eligible, record_process_exit};
+
+    #[test]
+    fn duplicate_process_exit_keeps_the_first_returncode() {
+        let mut exited = false;
+        let mut returncode = None;
+        assert_eq!(
+            record_process_exit(&mut exited, &mut returncode, false, 7),
+            ProcessExitDecision::First {
+                should_finish: false
+            }
+        );
+        assert_eq!(
+            record_process_exit(&mut exited, &mut returncode, true, 99),
+            ProcessExitDecision::Duplicate
+        );
+        assert_eq!(returncode, Some(7));
+        assert!(process_connection_lost_eligible(exited, true));
     }
 }

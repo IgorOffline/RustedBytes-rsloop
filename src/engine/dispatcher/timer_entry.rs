@@ -4,6 +4,19 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+fn compare_timer_parts<T: Ord>(
+    left_when: &T,
+    left_seq: u64,
+    right_when: &T,
+    right_seq: u64,
+) -> Ordering {
+    // `BinaryHeap` is a max-heap, so reverse both keys to pop the earliest
+    // deadline first and preserve insertion order for ties.
+    right_when
+        .cmp(left_when)
+        .then_with(|| right_seq.cmp(&left_seq))
+}
+
 pub(super) struct TimerEntry {
     pub(super) when: Instant,
     pub(super) seq: u64,
@@ -26,12 +39,78 @@ impl PartialOrd for TimerEntry {
 
 impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        // `BinaryHeap` is a max-heap, so reverse both keys to pop the earliest
-        // deadline first and preserve insertion order for ties.
-        other
-            .when
-            .cmp(&self.when)
-            .then_with(|| other.seq.cmp(&self.seq))
+        compare_timer_parts(&self.when, self.seq, &other.when, other.seq)
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use std::cmp::Ordering;
+
+    use super::compare_timer_parts;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct TimerKey {
+        deadline: u64,
+        sequence: u64,
+    }
+
+    impl Ord for TimerKey {
+        fn cmp(&self, other: &Self) -> Ordering {
+            compare_timer_parts(
+                &self.deadline,
+                self.sequence,
+                &other.deadline,
+                other.sequence,
+            )
+        }
+    }
+
+    impl PartialOrd for TimerKey {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    #[kani::proof]
+    fn core_timer_key_obeys_total_order_laws() {
+        let a = TimerKey {
+            deadline: kani::any(),
+            sequence: kani::any(),
+        };
+        let b = TimerKey {
+            deadline: kani::any(),
+            sequence: kani::any(),
+        };
+        let c = TimerKey {
+            deadline: kani::any(),
+            sequence: kani::any(),
+        };
+
+        assert_eq!(a.cmp(&a), Ordering::Equal);
+        assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+        assert_eq!(a.cmp(&b) == Ordering::Equal, a == b);
+        if a <= b && b <= c {
+            assert!(a <= c);
+        }
+    }
+
+    #[kani::proof]
+    fn core_timer_key_preserves_equal_deadline_sequence_order() {
+        let deadline: u64 = kani::any();
+        let earlier: u64 = kani::any();
+        let later: u64 = kani::any();
+        kani::assume(earlier < later);
+
+        let earlier = TimerKey {
+            deadline,
+            sequence: earlier,
+        };
+        let later = TimerKey {
+            deadline,
+            sequence: later,
+        };
+        assert!(earlier > later);
     }
 }
 
