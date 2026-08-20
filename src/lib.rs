@@ -28,6 +28,8 @@ pub mod rust_async;
 mod transport;
 #[cfg(kani)]
 mod verification;
+#[path = "vibeio/lib.rs"]
+pub(crate) mod vibeio;
 
 pub(crate) use platform::fd as fd_ops;
 #[cfg(windows)]

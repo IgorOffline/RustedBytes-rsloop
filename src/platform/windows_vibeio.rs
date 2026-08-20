@@ -109,8 +109,11 @@ fn spawn_service_thread(
 #[cfg(windows)]
 fn build_service_runtime(
     ready_tx: &std::sync::mpsc::SyncSender<Result<(), String>>,
-) -> Result<vibeio::Runtime, ()> {
-    match vibeio::RuntimeBuilder::new().rsloop_profile().build() {
+) -> Result<crate::vibeio::Runtime, ()> {
+    match crate::vibeio::RuntimeBuilder::new()
+        .rsloop_profile()
+        .build()
+    {
         Ok(runtime) => Ok(runtime),
         Err(err) => {
             let _ = ready_tx.send(Err(err.to_string()));
@@ -124,7 +127,7 @@ async fn run_service_commands(
     mut rx: mpsc::UnboundedReceiver<Command>,
     thread_tx: mpsc::UnboundedSender<Command>,
 ) {
-    let mut tasks: HashMap<u64, vibeio::JoinHandle<()>> = HashMap::new();
+    let mut tasks: HashMap<u64, crate::vibeio::JoinHandle<()>> = HashMap::new();
 
     while let Some(command) = rx.next().await {
         handle_service_command(command, &thread_tx, &mut tasks);
@@ -139,12 +142,12 @@ async fn run_service_commands(
 fn handle_service_command(
     command: Command,
     thread_tx: &mpsc::UnboundedSender<Command>,
-    tasks: &mut HashMap<u64, vibeio::JoinHandle<()>>,
+    tasks: &mut HashMap<u64, crate::vibeio::JoinHandle<()>>,
 ) {
     match command {
         Command::Spawn { id, factory } => {
             let finished_tx = thread_tx.clone();
-            let handle = vibeio::spawn(async move {
+            let handle = crate::vibeio::spawn(async move {
                 factory().await;
                 let _ = finished_tx.unbounded_send(Command::Finished { id });
             });

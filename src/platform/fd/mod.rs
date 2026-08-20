@@ -121,7 +121,7 @@ pub async fn wait_readable(fd: RawFd) -> PyResult<()> {
             let (tx, rx) = futures::channel::oneshot::channel();
             let task = crate::windows_vibeio::spawn(move || async move {
                 let result = async {
-                    let stream = vibeio::net::PollTcpStream::from_std(stream)?;
+                    let stream = crate::vibeio::net::PollTcpStream::from_std(stream)?;
                     let mut buf = [0_u8; 1];
                     stream.peek(&mut buf).await.map(|_| ())
                 }

@@ -927,9 +927,14 @@ dependencies = [
  "async-io",
  "async-std",
  "crossbeam-channel",
+ "crossbeam-queue",
  "futures",
+ "futures-util",
+ "io-uring",
  "libc",
  "memchr",
+ "mio",
+ "oneshot",
  "profiling",
  "proptest",
  "pyo3",
@@ -939,10 +944,10 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "signal-hook",
+ "slab",
  "socket2",
  "tokio",
  "tracy-client",
- "vibeio",
  "windows-sys 0.61.2",
 ]
 
@@ -1258,21 +1263,6 @@ name = "value-bag"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ba6f5989077681266825251a52748b8c1d8a4ad098cc37e440103d0ea717fc0"
-
-[[package]]
-name = "vibeio"
-version = "0.2.15"
-dependencies = [
- "crossbeam-queue",
- "futures-util",
- "io-uring",
- "libc",
- "mio",
- "oneshot",
- "slab",
- "tokio",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "wasi"

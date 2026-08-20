@@ -41,7 +41,7 @@ thread_local! {
     /// are still alive). If a loop is never closed, its runtime is leaked at
     /// thread exit rather than dropped — dropping during TLS destruction trips
     /// an AccessError panic inside vibeio's `Runtime::drop`.
-    static LOOP_RUNTIMES: RefCell<HashMap<usize, std::mem::ManuallyDrop<vibeio::Runtime>>> =
+    static LOOP_RUNTIMES: RefCell<HashMap<usize, std::mem::ManuallyDrop<crate::vibeio::Runtime>>> =
         RefCell::new(HashMap::new());
 
     /// Handles for cancellable I/O tasks (accept loops, socket readers) spawned
@@ -50,7 +50,7 @@ thread_local! {
     /// here) never conflicts with the park holding an immutable `LOOP_RUNTIMES`
     /// borrow across `block_on`. `JoinHandle` is `!Send`, so this must live in
     /// TLS on the loop thread.
-    static IO_TASKS: RefCell<HashMap<usize, HashMap<RawFd, vibeio::JoinHandle<()>>>> =
+    static IO_TASKS: RefCell<HashMap<usize, HashMap<RawFd, crate::vibeio::JoinHandle<()>>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -90,14 +90,14 @@ impl LoopWake {
 /// GIL and drains.
 struct WaitForWake {
     wake: Arc<LoopWake>,
-    sleep: Pin<Box<vibeio::time::Sleep>>,
+    sleep: Pin<Box<crate::vibeio::time::Sleep>>,
 }
 
 impl WaitForWake {
     fn new(wake: Arc<LoopWake>, timeout: Duration) -> Self {
         Self {
             wake,
-            sleep: Box::pin(vibeio::time::Sleep::new(timeout)),
+            sleep: Box::pin(crate::vibeio::time::Sleep::new(timeout)),
         }
     }
 }
@@ -500,7 +500,7 @@ impl LoopCore {
                 .entry(loop_runtime_key)
                 .or_insert_with(|| {
                     std::mem::ManuallyDrop::new(
-                        vibeio::RuntimeBuilder::new()
+                        crate::vibeio::RuntimeBuilder::new()
                             .rsloop_profile()
                             .enable_timer(true)
                             .build()
@@ -1425,7 +1425,7 @@ mod wake_tests {
 
     #[test]
     fn wait_for_wake_completes_when_its_timer_expires() {
-        let runtime = vibeio::RuntimeBuilder::new()
+        let runtime = crate::vibeio::RuntimeBuilder::new()
             .enable_timer(true)
             .build()
             .expect("timer-enabled runtime");

@@ -36,7 +36,7 @@ fn timer_wait_needs_replacement<T: PartialEq>(current: Option<&T>, deadline: &T)
 struct RuntimeDispatcher {
     core: Arc<LoopCore>,
     command_rx: Receiver<LoopCommand>,
-    timer_wait: Option<(Instant, vibeio::time::Sleep)>,
+    timer_wait: Option<(Instant, crate::vibeio::time::Sleep)>,
     ready_batch: VecDeque<ReadyItem>,
     timers: BinaryHeap<TimerEntry>,
     next_timer_id: u64,
@@ -68,7 +68,7 @@ enum WatchTask {
         stop: Arc<AtomicBool>,
         join: thread::JoinHandle<()>,
     },
-    Vibeio(vibeio::JoinHandle<()>),
+    Vibeio(crate::vibeio::JoinHandle<()>),
 }
 
 impl WatchTask {
@@ -118,7 +118,7 @@ pub fn run_runtime_thread(core: Arc<LoopCore>, command_rx: Receiver<LoopCommand>
     if tracy_client::Client::is_running() {
         tracy_client::set_thread_name!("rsloop-runtime");
     }
-    let runtime = vibeio::RuntimeBuilder::new()
+    let runtime = crate::vibeio::RuntimeBuilder::new()
         .rsloop_profile()
         .enable_timer(true)
         .build()
@@ -188,7 +188,8 @@ impl Future for RuntimeDispatcher {
                 &deadline,
             );
             if replace_timer {
-                self.timer_wait = Some((deadline, vibeio::time::Sleep::sleep_until(deadline)));
+                self.timer_wait =
+                    Some((deadline, crate::vibeio::time::Sleep::sleep_until(deadline)));
             }
             let (_, sleep) = self.timer_wait.as_mut().expect("timer wait missing");
             if Pin::new(sleep).poll(cx).is_ready() {
@@ -447,13 +448,13 @@ impl RuntimeDispatcher {
 
                 let task = match reader {
                     crate::transport::stream::ReaderTarget::Tcp(stream) => {
-                        WatchTask::Vibeio(vibeio::spawn(
+                        WatchTask::Vibeio(crate::vibeio::spawn(
                             crate::transport::stream::run_tcp_socket_reader_task(core, stream),
                         ))
                     }
                     #[cfg(unix)]
                     crate::transport::stream::ReaderTarget::Unix(stream) => {
-                        WatchTask::Vibeio(vibeio::spawn(
+                        WatchTask::Vibeio(crate::vibeio::spawn(
                             crate::transport::stream::run_unix_socket_reader_task(core, stream),
                         ))
                     }
@@ -481,7 +482,7 @@ impl RuntimeDispatcher {
                     cancel_watch_task(task);
                 }
 
-                let task = WatchTask::Vibeio(vibeio::spawn(
+                let task = WatchTask::Vibeio(crate::vibeio::spawn(
                     crate::transport::stream::run_server_accept_task(server, listener),
                 ));
 
@@ -499,7 +500,7 @@ impl RuntimeDispatcher {
                 // vibeio JoinHandle has no Drop, so dropping it detaches (does
                 // not cancel) the running task.
                 let core = Arc::clone(&self.core);
-                std::mem::drop(vibeio::spawn(
+                std::mem::drop(crate::vibeio::spawn(
                     crate::transport::stream::run_connect_watch_task(core, fd, future),
                 ));
             }

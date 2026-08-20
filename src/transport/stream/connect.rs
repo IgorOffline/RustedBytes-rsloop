@@ -6,8 +6,8 @@ use std::os::fd::FromRawFd;
 use std::os::raw::c_int;
 use std::sync::Arc;
 
+use crate::vibeio::net::PollTcpStream as VibePollTcpStream;
 use pyo3::prelude::*;
-use vibeio::net::PollTcpStream as VibePollTcpStream;
 
 use crate::engine::{LoopCommand, LoopCore};
 use crate::fd_ops;
@@ -23,7 +23,7 @@ pub(crate) async fn run_connect_watch_task(
     fd: fd_ops::RawFd,
     future: Py<PyAny>,
 ) {
-    use vibeio::io::AsyncWritePoll;
+    use crate::vibeio::io::AsyncWritePoll;
 
     let wait_errno = 'wait: {
         let Ok(raw) = c_int::try_from(fd) else {

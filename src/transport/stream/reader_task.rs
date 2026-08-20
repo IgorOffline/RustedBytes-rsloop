@@ -19,14 +19,14 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::atomic::Ordering;
 
-use tokio::io::AsyncReadExt;
 #[cfg(windows)]
-use vibeio::io::AsyncRead as VibeAsyncRead;
-use vibeio::net::PollTcpStream as VibePollTcpStream;
+use crate::vibeio::io::AsyncRead as VibeAsyncRead;
+use crate::vibeio::net::PollTcpStream as VibePollTcpStream;
 #[cfg(unix)]
-use vibeio::net::PollUnixStream as VibePollUnixStream;
+use crate::vibeio::net::PollUnixStream as VibePollUnixStream;
 #[cfg(windows)]
-use vibeio::net::TcpStream as VibeTcpStream;
+use crate::vibeio::net::TcpStream as VibeTcpStream;
+use tokio::io::AsyncReadExt;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED;
 
@@ -136,17 +136,17 @@ pub(crate) async fn run_tcp_socket_reader_task(
     // uvicorn), this keeps their hot path aligned with native fast streams.
     // start_tls and large writes request a rebind to poll mode before they
     // reclaim or heavily write through the shared socket.
-    let mut reader = match VibeTcpStream::from_shared(stream, vibeio::RegistrationMode::Completion)
-    {
-        Ok(reader) => reader,
-        Err(err) => {
-            core.mark_poll_reader_ready(false);
-            core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
-                err.to_string(),
-            )));
-            return;
-        }
-    };
+    let mut reader =
+        match VibeTcpStream::from_shared(stream, crate::vibeio::RegistrationMode::Completion) {
+            Ok(reader) => reader,
+            Err(err) => {
+                core.mark_poll_reader_ready(false);
+                core.enqueue_pending_read_event(PendingReadEvent::ConnectionLost(Some(
+                    err.to_string(),
+                )));
+                return;
+            }
+        };
     let Some(mut buf) = core
         .acquire_read_buffer_async(STREAM_READ_BUFFER_SIZE)
         .await

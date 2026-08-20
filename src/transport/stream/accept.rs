@@ -26,11 +26,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::vibeio::net::TcpListener as VibeTcpListener;
+#[cfg(unix)]
+use crate::vibeio::net::UnixListener as VibeUnixListener;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use vibeio::net::TcpListener as VibeTcpListener;
-#[cfg(unix)]
-use vibeio::net::UnixListener as VibeUnixListener;
 
 use super::io_targets::StreamKind;
 #[cfg(windows)]
@@ -296,7 +296,7 @@ pub(super) async fn run_tcp_accept_task(server: Arc<ServerCore>, listener: StdTc
 }
 
 #[cfg(windows)]
-pub(super) struct WindowsAcceptPool(Vec<vibeio::JoinHandle<()>>);
+pub(super) struct WindowsAcceptPool(Vec<crate::vibeio::JoinHandle<()>>);
 
 #[cfg(windows)]
 impl Drop for WindowsAcceptPool {
@@ -322,7 +322,7 @@ pub(super) async fn run_windows_tcp_accept_pool(server: Arc<ServerCore>, listene
     };
     let lanes = (0..lane_count)
         .map(|_| {
-            vibeio::spawn(run_windows_tcp_accept_lane(
+            crate::vibeio::spawn(run_windows_tcp_accept_lane(
                 Arc::clone(&server),
                 Rc::clone(&listener),
             ))
