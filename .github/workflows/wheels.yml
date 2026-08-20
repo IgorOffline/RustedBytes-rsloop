@@ -62,7 +62,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.95.0
+          toolchain: stable
           components: llvm-tools-preview
 
       - name: Cache Cargo registry and target
@@ -103,7 +103,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.95.0
+          toolchain: stable
 
       - name: Cache Cargo registry and target
         uses: Swatinem/rust-cache@v2
