@@ -91,6 +91,13 @@ fi
 if [[ "$RUST_TARGET" == *-apple-darwin ]]; then
   export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 fi
+if [[ "$RUST_TARGET" == "aarch64-pc-windows-msvc" ]]; then
+  # rustc profile-generate binaries currently crash on native Windows ARM64:
+  # https://github.com/rust-lang/rust/issues/156675
+  echo "PGO is unavailable on Windows ARM64; building a normal fat-LTO release wheel"
+  export RUSTFLAGS="${RUSTFLAGS:-} -Clink-arg=/arm64hazardfree"
+  exec "${ROOT_DIR}/scripts/build-wheels.sh" "${BUILD_WHEEL_ARGS[@]}"
+fi
 
 RSLOOP_PYTHON_VERSIONS_OVERRIDE="${RSLOOP_PYTHON_VERSIONS:-}"
 rsloop_load_python_versions "$RUST_TARGET"
@@ -122,11 +129,6 @@ TARGET_USE="$(native_path "${PGO_WORK_DIR}/target-use")"
 MERGED_PROFILE="${PGO_WORK_DIR}/merged.profdata"
 mkdir -p "$PROFILE_DIR"
 BASE_RUSTFLAGS="${RUSTFLAGS:-}"
-if [[ "$RUST_TARGET" == "aarch64-pc-windows-msvc" ]]; then
-  # Windows 10+ does not support the affected Cortex-A53 processors, so skip
-  # MSVC's unnecessary erratum pass. This matches Rust's upstream target fix.
-  BASE_RUSTFLAGS+=" -Clink-arg=/arm64hazardfree"
-fi
 GENERATE_RUSTFLAGS="${BASE_RUSTFLAGS} -Cprofile-generate=$(native_path "$PROFILE_DIR")"
 USE_RUSTFLAGS="${BASE_RUSTFLAGS} -Cprofile-use=$(native_path "$MERGED_PROFILE") -Cllvm-args=-pgo-warn-missing-function"
 

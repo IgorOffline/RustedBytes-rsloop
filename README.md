@@ -363,8 +363,10 @@ between Python versions or free-threaded builds. The target must be native
 because the instrumented extension runs during training.
 
 Set `RSLOOP_PGO_SCENARIOS` to override the comma-separated network scenarios.
-Tagged and manually dispatched wheel workflows use PGO on every published
-platform.
+Tagged and manually dispatched wheel workflows use PGO on every supported
+platform except Windows ARM64. Rust profile-generation binaries currently
+crash on that target ([rust-lang/rust#156675](https://github.com/rust-lang/rust/issues/156675)),
+so it temporarily falls back to the normal fat-LTO release build.
 
 [`scripts/build-wheels.sh`](./scripts/build-wheels.sh) currently defaults to
 CPython `3.10 3.11 3.12 3.13 3.14`, and
