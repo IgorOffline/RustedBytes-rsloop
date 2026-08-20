@@ -122,6 +122,11 @@ TARGET_USE="$(native_path "${PGO_WORK_DIR}/target-use")"
 MERGED_PROFILE="${PGO_WORK_DIR}/merged.profdata"
 mkdir -p "$PROFILE_DIR"
 BASE_RUSTFLAGS="${RUSTFLAGS:-}"
+if [[ "$RUST_TARGET" == "aarch64-pc-windows-msvc" ]]; then
+  # MSVC must be able to move individual functions when applying its
+  # Cortex-A53 erratum workaround; this is rustc/LLVM's equivalent of /Gy.
+  BASE_RUSTFLAGS+=" -Cllvm-args=--function-sections"
+fi
 GENERATE_RUSTFLAGS="${BASE_RUSTFLAGS} -Cprofile-generate=$(native_path "$PROFILE_DIR")"
 USE_RUSTFLAGS="${BASE_RUSTFLAGS} -Cprofile-use=$(native_path "$MERGED_PROFILE") -Cllvm-args=-pgo-warn-missing-function"
 
