@@ -63,6 +63,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
+          components: llvm-tools-preview
 
       - name: Cache Cargo registry and target
         uses: Swatinem/rust-cache@v2
@@ -72,7 +73,7 @@ jobs:
         shell: bash
         env:
           RSLOOP_PYTHON_VERSIONS: ${{ matrix.python_versions }}
-        run: scripts/build-wheels.sh --out dist --target "${{ matrix.rust_target }}"
+        run: scripts/build-pgo-wheels.sh --out dist --target "${{ matrix.rust_target }}"
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4

@@ -347,6 +347,25 @@ Build release wheels into `dist/wheels`:
 scripts/build-wheels.sh
 ```
 
+Build the published-wheel configuration with profile-guided optimization:
+
+```bash
+rustup component add llvm-tools-preview
+scripts/build-pgo-wheels.sh
+```
+
+For each requested Python ABI, the PGO wrapper creates an instrumented wheel,
+trains it on sustained HTTP, TLS, WebSocket, mixed-stream, bulk-transfer,
+idle-connection, callback, task, and TCP workloads, merges the resulting LLVM
+profiles, and builds that ABI's final wheel with its matching profile. Per-ABI
+training avoids discarding counters when PyO3's generated control flow differs
+between Python versions or free-threaded builds. The target must be native
+because the instrumented extension runs during training.
+
+Set `RSLOOP_PGO_SCENARIOS` to override the comma-separated network scenarios.
+Tagged and manually dispatched wheel workflows use PGO on every published
+platform.
+
 [`scripts/build-wheels.sh`](./scripts/build-wheels.sh) currently defaults to
 CPython `3.10 3.11 3.12 3.13 3.14`, and
 uses `uv python install` / `uv python find` to locate interpreters.
