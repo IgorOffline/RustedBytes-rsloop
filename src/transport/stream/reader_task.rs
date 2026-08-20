@@ -369,12 +369,47 @@ pub(crate) async fn run_unix_socket_reader_task(
 }
 
 fn next_read_capacity(buf: &Vec<u8>) -> usize {
-    let capacity = buf.capacity().max(STREAM_READ_BUFFER_SIZE);
-    if buf.len() == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
+    next_read_capacity_for(buf.len(), buf.capacity())
+}
+
+fn next_read_capacity_for(len: usize, allocated_capacity: usize) -> usize {
+    let capacity = allocated_capacity.max(STREAM_READ_BUFFER_SIZE);
+    if len == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
         (capacity * 2).min(MAX_STREAM_READ_BUFFER_SIZE)
-    } else if capacity > STREAM_READ_BUFFER_SIZE && buf.len() < capacity / 4 {
+    } else if capacity > STREAM_READ_BUFFER_SIZE && len < capacity / 4 {
         (capacity / 2).max(STREAM_READ_BUFFER_SIZE)
     } else {
         capacity
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn merge_next_read_capacity_grows_and_shrinks_within_bounds() {
+        let len: usize = kani::any();
+        let allocated_capacity: usize = kani::any();
+        kani::assume(len <= allocated_capacity);
+
+        let capacity = allocated_capacity.max(STREAM_READ_BUFFER_SIZE);
+        let next = next_read_capacity_for(len, allocated_capacity);
+
+        assert!(next >= STREAM_READ_BUFFER_SIZE);
+        assert!(next <= capacity.max(MAX_STREAM_READ_BUFFER_SIZE));
+        if capacity <= MAX_STREAM_READ_BUFFER_SIZE {
+            assert!(next <= MAX_STREAM_READ_BUFFER_SIZE);
+        }
+
+        if len == capacity && capacity < MAX_STREAM_READ_BUFFER_SIZE {
+            assert_eq!(next, (capacity * 2).min(MAX_STREAM_READ_BUFFER_SIZE));
+            assert!(next > capacity);
+        } else if capacity > STREAM_READ_BUFFER_SIZE && len < capacity / 4 {
+            assert_eq!(next, (capacity / 2).max(STREAM_READ_BUFFER_SIZE));
+            assert!(next <= capacity);
+        } else {
+            assert_eq!(next, capacity);
+        }
     }
 }

@@ -298,19 +298,42 @@ pub(super) fn shutdown_unix_stream(stream: &StdUnixStream, how: Shutdown) -> io:
 }
 
 #[inline]
-fn is_no_buffer_space(err: &io::Error) -> bool {
+pub(super) fn is_no_buffer_space_code(raw_os_error: Option<i32>) -> bool {
     #[cfg(unix)]
-    if err.raw_os_error() == Some(libc::ENOBUFS) {
-        return true;
+    {
+        raw_os_error == Some(libc::ENOBUFS)
     }
     #[cfg(windows)]
-    if err.raw_os_error() == Some(10_055) {
-        // WSAENOBUFS
-        return true;
+    {
+        raw_os_error == Some(10_055) // WSAENOBUFS
     }
-    false
 }
 
+#[inline]
+fn is_no_buffer_space(err: &io::Error) -> bool {
+    is_no_buffer_space_code(err.raw_os_error())
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::is_no_buffer_space_code;
+
+    #[kani::proof]
+    fn merge_no_buffer_space_code_is_exact() {
+        let raw_os_error: Option<i32> = kani::any();
+
+        #[cfg(unix)]
+        assert_eq!(
+            is_no_buffer_space_code(raw_os_error),
+            raw_os_error == Some(libc::ENOBUFS)
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            is_no_buffer_space_code(raw_os_error),
+            raw_os_error == Some(10_055)
+        );
+    }
+}
 #[cfg(test)]
 mod shutdown_tests {
     #[cfg(unix)]

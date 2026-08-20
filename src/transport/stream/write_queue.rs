@@ -234,13 +234,47 @@ mod verification {
     use super::*;
 
     #[kani::proof]
-    fn core_writer_queue_reports_both_closed_ends() {
+    fn merge_writer_queue_reports_both_closed_ends() {
         let mut state = QueueState::with_capacity(0);
         state.receiver_alive = false;
         let rejected = state.enqueue(WriterCommand::Stop);
         assert!(matches!(rejected, Err(WriterCommand::Stop)));
 
         let mut state = QueueState::with_capacity(0);
+        state.sender_alive = false;
+        assert!(matches!(
+            state.try_dequeue(),
+            Err(TryRecvError::Disconnected)
+        ));
+    }
+
+    fn control_tag(command: &WriterCommand) -> u8 {
+        match command {
+            WriterCommand::WriteEof => 0,
+            WriterCommand::Close => 1,
+            WriterCommand::Abort => 2,
+            WriterCommand::Stop => 3,
+            WriterCommand::Data(_) => unreachable!("control-only model produced data"),
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn merge_writer_queue_preserves_control_fifo() {
+        let mut state = QueueState::with_capacity(4);
+        assert!(state.enqueue(WriterCommand::WriteEof).is_ok());
+        assert!(state.enqueue(WriterCommand::Close).is_ok());
+        assert!(state.enqueue(WriterCommand::Abort).is_ok());
+        assert!(state.enqueue(WriterCommand::Stop).is_ok());
+
+        for expected in 0..4 {
+            let Ok(command) = state.try_dequeue() else {
+                unreachable!("queued control command disappeared");
+            };
+            assert_eq!(control_tag(&command), expected);
+        }
+
+        assert!(matches!(state.try_dequeue(), Err(TryRecvError::Empty)));
         state.sender_alive = false;
         assert!(matches!(
             state.try_dequeue(),

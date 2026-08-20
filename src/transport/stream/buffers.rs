@@ -497,7 +497,7 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(12)]
-    fn core_owned_write_buffer_preserves_remaining_bytes() {
+    fn merge_owned_write_buffer_preserves_remaining_bytes() {
         let data = any_bytes::<MAX_BYTES>();
         let first: usize = kani::any();
         kani::assume(first <= data.len());
@@ -516,7 +516,29 @@ mod verification {
     }
 
     #[kani::proof]
-    fn core_append_and_retention_decisions_are_overflow_free() {
+    #[kani::unwind(12)]
+    fn merge_owned_write_buffer_append_preserves_or_rejects_content_atomically() {
+        const APPEND_BYTES: usize = 4;
+        let initial = any_bytes::<APPEND_BYTES>();
+        let incoming = any_bytes::<APPEND_BYTES>();
+        let offset: usize = kani::any();
+        kani::assume(offset <= initial.len());
+        let mut buffer = OwnedWriteBuffer::from_vec(initial.clone());
+        buffer.advance(offset);
+
+        let accepted = buffer.try_append(&incoming);
+        assert_eq!(accepted, offset == 0);
+        if accepted {
+            let mut expected = initial;
+            expected.extend_from_slice(&incoming);
+            assert_eq!(buffer.remaining(), expected.as_slice());
+        } else {
+            assert_eq!(buffer.remaining(), &initial[offset..]);
+        }
+    }
+
+    #[kani::proof]
+    fn merge_append_and_retention_decisions_are_overflow_free() {
         let offset: usize = kani::any();
         let current_len: usize = kani::any();
         let incoming_len: usize = kani::any();

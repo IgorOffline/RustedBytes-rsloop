@@ -19,7 +19,7 @@ use std::time::Duration;
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 
 use super::buffers::OwnedWriteBuffer;
-use super::io_targets::WriterTarget;
+use super::io_targets::{WriterTarget, is_no_buffer_space_code};
 use super::tls_session::{
     SharedTlsIoState, abort_tls_writer, close_tls_writer, flush_tls_io_locked,
 };
@@ -370,16 +370,7 @@ pub(super) fn is_transient_write_backpressure(err: &io::Error) -> bool {
     if err.kind() == io::ErrorKind::WouldBlock {
         return true;
     }
-    #[cfg(unix)]
-    if err.raw_os_error() == Some(libc::ENOBUFS) {
-        return true;
-    }
-    #[cfg(windows)]
-    if err.raw_os_error() == Some(10_055) {
-        // WSAENOBUFS
-        return true;
-    }
-    false
+    is_no_buffer_space_code(err.raw_os_error())
 }
 
 #[cfg(test)]

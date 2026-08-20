@@ -73,7 +73,7 @@ mod verification {
     }
 
     #[kani::proof]
-    fn core_timer_key_obeys_total_order_laws() {
+    fn merge_timer_key_obeys_total_order_laws() {
         let a = TimerKey {
             deadline: kani::any(),
             sequence: kani::any(),
@@ -96,7 +96,7 @@ mod verification {
     }
 
     #[kani::proof]
-    fn core_timer_key_preserves_equal_deadline_sequence_order() {
+    fn merge_timer_key_preserves_equal_deadline_sequence_order() {
         let deadline: u64 = kani::any();
         let earlier: u64 = kani::any();
         let later: u64 = kani::any();

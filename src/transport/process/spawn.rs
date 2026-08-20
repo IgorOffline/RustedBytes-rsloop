@@ -43,6 +43,10 @@ pub(super) struct ProcessPipes {
     stderr: Option<BoxedProcessReader>,
 }
 
+fn open_pipe_mask(has_stdin: bool, has_stdout: bool, has_stderr: bool) -> u8 {
+    u8::from(has_stdin) | (u8::from(has_stdout) << 1) | (u8::from(has_stderr) << 2)
+}
+
 impl ProcessPipes {
     pub(super) fn take_from(
         child: &mut Child,
@@ -67,15 +71,16 @@ impl ProcessPipes {
     }
 
     pub(super) fn open_pipes(&self) -> HashSet<i32> {
-        let mut open_pipes = HashSet::with_capacity(3);
-        if self.stdin.is_some() {
-            open_pipes.insert(0);
-        }
-        if self.stdout.is_some() {
-            open_pipes.insert(1);
-        }
-        if self.stderr.is_some() {
-            open_pipes.insert(2);
+        let mask = open_pipe_mask(
+            self.stdin.is_some(),
+            self.stdout.is_some(),
+            self.stderr.is_some(),
+        );
+        let mut open_pipes = HashSet::with_capacity(mask.count_ones() as usize);
+        for fd in 0..3 {
+            if mask & (1 << fd) != 0 {
+                open_pipes.insert(fd);
+            }
         }
         open_pipes
     }
@@ -299,6 +304,28 @@ pub(super) fn make_python_pipe_file(
     let os = py.import("os")?;
     let dup = fd_ops::dup_raw_fd(fd).map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
     Ok(os.getattr("fdopen")?.call1((dup, mode, 0))?.unbind())
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::open_pipe_mask;
+
+    #[kani::proof]
+    fn merge_initial_process_pipe_mask_is_exact() {
+        let stdin: bool = kani::any();
+        let stdout: bool = kani::any();
+        let stderr: bool = kani::any();
+        let mask = open_pipe_mask(stdin, stdout, stderr);
+
+        assert_eq!(mask & 1 != 0, stdin);
+        assert_eq!(mask & 2 != 0, stdout);
+        assert_eq!(mask & 4 != 0, stderr);
+        assert_eq!(
+            mask.count_ones(),
+            u32::from(stdin) + u32::from(stdout) + u32::from(stderr)
+        );
+        assert_eq!(mask & !0b111, 0);
+    }
 }
 
 #[cfg(test)]

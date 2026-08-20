@@ -11,6 +11,11 @@ use std::time::Duration;
 use super::tuning::BLOCKING_POLL_INTERVAL_MS;
 use crate::fd_ops;
 
+fn clamp_poll_timeout_ms(remaining_ms: u128) -> i32 {
+    let timeout = remaining_ms.clamp(1, u128::from(i32::MAX.unsigned_abs()));
+    i32::try_from(timeout).expect("poll timeout is clamped to i32::MAX")
+}
+
 pub(super) fn wait_socket_ready(
     fd: fd_ops::RawFd,
     pollable: bool,
@@ -70,12 +75,8 @@ pub(super) fn wait_socket_ready_until(
                 ));
             }
 
-            let remaining_ms = deadline
-                .saturating_duration_since(now)
-                .as_millis()
-                .clamp(1, u128::from(i32::MAX.unsigned_abs()));
-            let remaining_ms =
-                i32::try_from(remaining_ms).expect("poll timeout is clamped to i32::MAX");
+            let remaining_ms = deadline.saturating_duration_since(now).as_millis();
+            let remaining_ms = clamp_poll_timeout_ms(remaining_ms);
             match fd_ops::poll_fd(fd, read, write, remaining_ms) {
                 Ok((read_ready, write_ready))
                     if (!read || read_ready) && (!write || write_ready) =>
@@ -96,4 +97,25 @@ pub(super) fn wait_socket_ready_until(
     }
     thread::sleep(Duration::from_millis(10));
     Ok(())
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::clamp_poll_timeout_ms;
+
+    #[kani::proof]
+    fn merge_poll_timeout_is_positive_and_fits_c_int() {
+        let remaining_ms: u128 = kani::any();
+        let timeout = clamp_poll_timeout_ms(remaining_ms);
+
+        assert!(timeout >= 1);
+        assert!(timeout <= i32::MAX);
+        if remaining_ms == 0 {
+            assert_eq!(timeout, 1);
+        } else if remaining_ms > i32::MAX as u128 {
+            assert_eq!(timeout, i32::MAX);
+        } else {
+            assert_eq!(timeout as u128, remaining_ms);
+        }
+    }
 }

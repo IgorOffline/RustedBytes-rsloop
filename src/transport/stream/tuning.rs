@@ -44,18 +44,25 @@ pub(super) const WRITE_BUFFER_POOL_LIMIT: usize =
 pub(super) const TLS_WORKER_STACK_SIZE: usize = 256 * 1024;
 const DEFAULT_MAX_PENDING_TLS_HANDSHAKES: usize = 256;
 
+fn positive_usize_or_default(value: Option<usize>, default: usize) -> usize {
+    value.filter(|value| *value > 0).unwrap_or(default)
+}
+
+fn reader_spin_micros(value: Option<u64>) -> u64 {
+    value.unwrap_or(30).min(1_000)
+}
+
 fn parse_positive_usize(value: Option<&str>, default: usize) -> usize {
-    value
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+    positive_usize_or_default(
+        value.and_then(|value| value.trim().parse::<usize>().ok()),
+        default,
+    )
 }
 
 fn parse_reader_spin_window(value: Option<&str>) -> Duration {
-    let micros = value
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(30);
-    Duration::from_micros(micros.min(1_000))
+    Duration::from_micros(reader_spin_micros(
+        value.and_then(|value| value.trim().parse::<u64>().ok()),
+    ))
 }
 
 pub(super) fn max_pending_tls_handshakes() -> usize {
@@ -84,6 +91,37 @@ pub(super) fn reader_spin_window() -> Duration {
         let value = std::env::var("RSLOOP_READER_SPIN_US").ok();
         parse_reader_spin_window(value.as_deref())
     })
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{positive_usize_or_default, reader_spin_micros};
+
+    #[kani::proof]
+    fn merge_positive_tuning_values_preserve_override_or_default() {
+        let value: Option<usize> = kani::any();
+        let default: usize = kani::any();
+        kani::assume(default > 0);
+
+        let selected = positive_usize_or_default(value, default);
+        assert!(selected > 0);
+        match value {
+            Some(value) if value > 0 => assert_eq!(selected, value),
+            _ => assert_eq!(selected, default),
+        }
+    }
+
+    #[kani::proof]
+    fn merge_reader_spin_window_defaults_and_clamps() {
+        let value: Option<u64> = kani::any();
+        let micros = reader_spin_micros(value);
+
+        assert!(micros <= 1_000);
+        assert_eq!(micros, value.unwrap_or(30).min(1_000));
+        if value.is_none() {
+            assert_eq!(micros, 30);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -60,13 +60,16 @@ pub(super) fn send_process_signal(child: &Child, signal: i32) -> std::io::Result
     }
 }
 
+#[cfg(unix)]
+fn process_exit_code_parts(code: Option<i32>, signal: Option<i32>) -> i32 {
+    code.or_else(|| signal.and_then(i32::checked_neg))
+        .unwrap_or(-1)
+}
+
 pub(super) fn process_exit_code(status: std::process::ExitStatus) -> i32 {
     #[cfg(unix)]
     {
-        status
-            .code()
-            .or_else(|| status.signal().map(|signal| -signal))
-            .unwrap_or(-1)
+        process_exit_code_parts(status.code(), status.signal())
     }
     #[cfg(windows)]
     {
@@ -206,6 +209,30 @@ pub(super) fn run_process_waiter(
             Ok(command) => handle_process_command(&core, &mut child, command),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+#[cfg(all(kani, unix))]
+mod verification {
+    use super::process_exit_code_parts;
+
+    #[kani::proof]
+    fn merge_process_exit_code_prefers_status_then_negated_signal() {
+        let code: Option<i32> = kani::any();
+        let signal: Option<i32> = kani::any();
+        let result = process_exit_code_parts(code, signal);
+
+        if let Some(code) = code {
+            assert_eq!(result, code);
+        } else if let Some(signal) = signal {
+            if let Some(negated) = signal.checked_neg() {
+                assert_eq!(result, negated);
+            } else {
+                assert_eq!(result, -1);
+            }
+        } else {
+            assert_eq!(result, -1);
         }
     }
 }

@@ -28,6 +28,10 @@ use signal_hook::iterator::{Handle as SignalHandle, Signals};
 mod timer_entry;
 use timer_entry::TimerEntry;
 
+fn timer_wait_needs_replacement<T: PartialEq>(current: Option<&T>, deadline: &T) -> bool {
+    current.is_none_or(|current| current != deadline)
+}
+
 /// Long-lived future driven by the coordination thread's `vibeio` runtime.
 struct RuntimeDispatcher {
     core: Arc<LoopCore>,
@@ -179,10 +183,10 @@ impl Future for RuntimeDispatcher {
                 self.timer_wait = None;
                 return Poll::Pending;
             };
-            let replace_timer = self
-                .timer_wait
-                .as_ref()
-                .is_none_or(|(current, _)| *current != deadline);
+            let replace_timer = timer_wait_needs_replacement(
+                self.timer_wait.as_ref().map(|(current, _)| current),
+                &deadline,
+            );
             if replace_timer {
                 self.timer_wait = Some((deadline, vibeio::time::Sleep::sleep_until(deadline)));
             }
@@ -583,6 +587,25 @@ impl RuntimeDispatcher {
         }
         for (_, task) in self.accept_tasks.drain() {
             abort_watch_task(task);
+        }
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::timer_wait_needs_replacement;
+
+    #[kani::proof]
+    fn merge_timer_wait_is_reused_only_for_the_same_deadline() {
+        let current: Option<u64> = kani::any();
+        let deadline: u64 = kani::any();
+        let replace = timer_wait_needs_replacement(current.as_ref(), &deadline);
+
+        assert_eq!(replace, current != Some(deadline));
+        if current == Some(deadline) {
+            assert!(!replace);
+        } else {
+            assert!(replace);
         }
     }
 }

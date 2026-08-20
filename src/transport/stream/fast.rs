@@ -399,6 +399,10 @@ impl Separators {
     }
 }
 
+fn separator_match_replaces(best: Option<(usize, usize)>, candidate_end: usize) -> bool {
+    best.is_none_or(|(_, best_end)| candidate_end < best_end)
+}
+
 /// Scan state for one `readuntil()` / `readline()` call.
 ///
 /// `offset` is asyncio's: the number of leading buffer bytes already known not
@@ -453,7 +457,7 @@ impl UntilReadState {
                 return;
             };
             let match_end = match_start + separator.len();
-            if best.is_none_or(|(_, best_end)| match_end < best_end) {
+            if separator_match_replaces(best, match_end) {
                 best = Some((match_start, match_end));
             }
         };
@@ -486,12 +490,15 @@ impl UntilReadState {
 
 #[cfg(kani)]
 mod verification {
-    use super::{ReadBuffer, Separators, UntilReadState, UntilScan, exact_fill_amount, find_from};
+    use super::{
+        ReadBuffer, Separators, UntilReadState, UntilScan, exact_fill_amount, find_from,
+        separator_match_replaces,
+    };
     use crate::verification::MAX_BYTES;
 
     #[kani::proof]
     #[kani::unwind(6)]
-    fn core_read_buffer_consume_saturates_without_overflow() {
+    fn merge_read_buffer_consume_saturates_without_overflow() {
         let count: usize = kani::any();
         let mut buffer = ReadBuffer::with_capacity(0);
         buffer.extend(b"abc");
@@ -508,7 +515,7 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(8)]
-    fn core_find_from_handles_bounded_offsets() {
+    fn merge_find_from_handles_bounded_offsets() {
         let from = usize::from(kani::any::<u8>() % 7);
         let expected = match from {
             0 | 1 => Some(1),
@@ -519,8 +526,47 @@ mod verification {
     }
 
     #[kani::proof]
+    fn merge_find_from_handles_empty_needle() {
+        let from: usize = kani::any();
+        assert_eq!(find_from(b"abaca", b"", from), (from <= 5).then_some(from));
+    }
+
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn merge_separator_selection_keeps_the_earliest_end_and_first_tie() {
+        const CANDIDATES: usize = 4;
+        let active: [bool; CANDIDATES] = kani::any();
+        let ends: [usize; CANDIDATES] = kani::any();
+        let mut best: Option<(usize, usize)> = None;
+
+        for index in 0..CANDIDATES {
+            if active[index] && separator_match_replaces(best, ends[index]) {
+                best = Some((index, ends[index]));
+            }
+
+            if let Some((best_index, best_end)) = best {
+                assert!(best_index <= index);
+                assert!(active[best_index]);
+                assert_eq!(best_end, ends[best_index]);
+                for earlier in 0..=index {
+                    if active[earlier] {
+                        assert!(best_end <= ends[earlier]);
+                        if earlier < best_index {
+                            assert!(ends[earlier] > best_end);
+                        }
+                    }
+                }
+            } else {
+                for earlier in 0..=index {
+                    assert!(!active[earlier]);
+                }
+            }
+        }
+    }
+
+    #[kani::proof]
     #[kani::unwind(10)]
-    fn core_readuntil_fruitless_scan_has_exact_offset() {
+    fn merge_readuntil_fruitless_scan_has_exact_offset() {
         let len: usize = kani::any();
         kani::assume(len <= MAX_BYTES);
         let limit: usize = kani::any();
@@ -633,7 +679,7 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(10)]
-    fn core_overlapping_separator_chooses_the_earliest_match() {
+    fn merge_overlapping_separator_chooses_the_earliest_match() {
         let mut state =
             UntilReadState::new(Separators::single(b"aba"), false).expect("valid separator");
         assert_eq!(
@@ -731,7 +777,7 @@ mod verification {
     }
 
     #[kani::proof]
-    fn core_exact_read_fill_range_is_initialized_and_in_bounds() {
+    fn merge_exact_read_fill_range_is_initialized_and_in_bounds() {
         let buffer_len: usize = kani::any();
         let filled: usize = kani::any();
         let expected: usize = kani::any();

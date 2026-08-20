@@ -48,6 +48,26 @@ pub fn dup_raw_fd(fd: RawFd) -> io::Result<RawFd> {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PollReadiness {
+    Invalid,
+    Ready { read: bool, write: bool },
+}
+
+#[cfg(unix)]
+fn decode_poll_revents(read: bool, write: bool, revents: i32) -> PollReadiness {
+    if revents & i32::from(libc::POLLNVAL) != 0 {
+        return PollReadiness::Invalid;
+    }
+
+    let error_bits = i32::from(libc::POLLERR | libc::POLLHUP);
+    PollReadiness::Ready {
+        read: read && (revents & (i32::from(libc::POLLIN) | error_bits)) != 0,
+        write: write && (revents & (i32::from(libc::POLLOUT) | error_bits)) != 0,
+    }
+}
+
+#[cfg(unix)]
 pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Result<(bool, bool)> {
     if !read && !write {
         return Ok((false, false));
@@ -83,22 +103,13 @@ pub fn poll_fd(fd: RawFd, read: bool, write: bool, timeout_ms: i32) -> io::Resul
         return Err(err);
     }
 
-    let revents = i32::from(pollfd.revents);
-    // POLLNVAL means the descriptor is not open (e.g. the socket was closed
-    // out from under the watcher). Reporting it as "ready" would make
-    // watchers fire forever on a dead fd, so surface it as an error instead;
-    // a closed fd produces no readiness events on asyncio either.
-    if revents & i32::from(libc::POLLNVAL) != 0 {
-        return Err(io::Error::new(
+    match decode_poll_revents(read, write, i32::from(pollfd.revents)) {
+        PollReadiness::Invalid => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "file descriptor is not open",
-        ));
+        )),
+        PollReadiness::Ready { read, write } => Ok((read, write)),
     }
-    let error_bits = i32::from(libc::POLLERR | libc::POLLHUP);
-    Ok((
-        read && (revents & (i32::from(libc::POLLIN) | error_bits)) != 0,
-        write && (revents & (i32::from(libc::POLLOUT) | error_bits)) != 0,
-    ))
 }
 
 pub async fn wait_readable(fd: RawFd) -> PyResult<()> {
@@ -191,9 +202,20 @@ pub fn is_retryable_socket_error(py: Python<'_>, err: &PyErr) -> PyResult<bool> 
     Ok(err.is_instance(py, &blocking) || err.is_instance(py, &interrupted))
 }
 
+fn raw_fd_fits_c_int(fd: RawFd) -> bool {
+    fd >= RawFd::from(libc::c_int::MIN) && fd <= RawFd::from(libc::c_int::MAX)
+}
+
 fn raw_fd_to_c_int(fd: RawFd) -> io::Result<libc::c_int> {
-    fd.try_into()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "descriptor out of range"))
+    if raw_fd_fits_c_int(fd) {
+        Ok(libc::c_int::try_from(fd)
+            .expect("descriptor accepted by raw_fd_fits_c_int must fit in c_int"))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "descriptor out of range",
+        ))
+    }
 }
 
 /// A `connect()` attempt that is still completing in the background.
@@ -229,6 +251,66 @@ pub fn socket_so_error(fd: RawFd) -> io::Result<i32> {
         Ok(value)
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn merge_raw_descriptor_range_matches_c_int() {
+        let fd: RawFd = kani::any();
+        let expected = fd >= RawFd::from(libc::c_int::MIN) && fd <= RawFd::from(libc::c_int::MAX);
+        assert_eq!(raw_fd_fits_c_int(fd), expected);
+        if expected {
+            assert_eq!(RawFd::from(fd as libc::c_int), fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[kani::proof]
+    fn merge_connect_errno_classification_is_exact() {
+        let errno: i32 = kani::any();
+        assert_eq!(
+            is_connect_in_progress_errno(errno),
+            errno == libc::EINPROGRESS || errno == libc::EALREADY || errno == libc::EWOULDBLOCK
+        );
+        assert_eq!(is_already_connected_errno(errno), errno == libc::EISCONN);
+        assert!(!(is_connect_in_progress_errno(errno) && is_already_connected_errno(errno)));
+    }
+
+    #[cfg(unix)]
+    #[kani::proof]
+    fn merge_poll_readiness_decoding_respects_interests_and_error_bits() {
+        let read: bool = kani::any();
+        let write: bool = kani::any();
+        let revents: i32 = kani::any();
+        let decoded = decode_poll_revents(read, write, revents);
+
+        if revents & i32::from(libc::POLLNVAL) != 0 {
+            assert_eq!(decoded, PollReadiness::Invalid);
+            return;
+        }
+
+        let PollReadiness::Ready {
+            read: read_ready,
+            write: write_ready,
+        } = decoded
+        else {
+            unreachable!("valid poll bits were classified as invalid");
+        };
+        let error_bits = i32::from(libc::POLLERR | libc::POLLHUP);
+        assert_eq!(
+            read_ready,
+            read && revents & (i32::from(libc::POLLIN) | error_bits) != 0
+        );
+        assert_eq!(
+            write_ready,
+            write && revents & (i32::from(libc::POLLOUT) | error_bits) != 0
+        );
+        assert!(!read_ready || read);
+        assert!(!write_ready || write);
     }
 }
 

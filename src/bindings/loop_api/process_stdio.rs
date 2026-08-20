@@ -16,7 +16,7 @@ use super::process_handles;
 use crate::fd_ops;
 use crate::transport::process::BoxedProcessReader;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProcessStdioSpec {
     Inherit,
     Pipe,
@@ -31,6 +31,39 @@ pub(super) struct ProcessStdioSpecs {
     pub(super) stdin: ProcessStdioSpec,
     pub(super) stdout: ProcessStdioSpec,
     pub(super) stderr: ProcessStdioSpec,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessStdioPlan {
+    Standard,
+    SharedOutputPipe,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessStdioPlanError {
+    StdinRedirect,
+    StdoutRedirect,
+}
+
+fn process_stdio_plan(
+    stdin: ProcessStdioSpec,
+    stdout: ProcessStdioSpec,
+    stderr: ProcessStdioSpec,
+) -> Result<ProcessStdioPlan, ProcessStdioPlanError> {
+    if matches!(stdin, ProcessStdioSpec::Stdout) {
+        return Err(ProcessStdioPlanError::StdinRedirect);
+    }
+    if matches!(stdout, ProcessStdioSpec::Stdout) {
+        return Err(ProcessStdioPlanError::StdoutRedirect);
+    }
+    if matches!(
+        (stdout, stderr),
+        (ProcessStdioSpec::Pipe, ProcessStdioSpec::Stdout)
+    ) {
+        Ok(ProcessStdioPlan::SharedOutputPipe)
+    } else {
+        Ok(ProcessStdioPlan::Standard)
+    }
 }
 
 impl ProcessStdioSpecs {
@@ -116,13 +149,15 @@ pub(super) fn apply_stdio(
         stdout,
         stderr,
     } = specs;
-    command.stdin(stdin_stdio(stdin)?);
+    let plan = process_stdio_plan(stdin, stdout, stderr)
+        .map_err(|_| PyValueError::new_err("STDOUT can only be used for stderr"))?;
+    command.stdin(output_stdio(stdin)?);
 
     let mut stdout_override = None;
     let stderr_override = None;
 
-    match (stdout, stderr) {
-        (ProcessStdioSpec::Pipe, ProcessStdioSpec::Stdout) => {
+    match plan {
+        ProcessStdioPlan::SharedOutputPipe => {
             let (read_end, write_end) = process_handles::new_pipe()?;
             let stderr_end = write_end
                 .try_clone()
@@ -131,22 +166,13 @@ pub(super) fn apply_stdio(
             command.stderr(Stdio::from(stderr_end));
             stdout_override = Some(Box::new(read_end) as BoxedProcessReader);
         }
-        (stdout, stderr) => {
+        ProcessStdioPlan::Standard => {
             command.stdout(output_stdio(stdout)?);
             command.stderr(stderr_stdio(stderr, stdout)?);
         }
     }
 
     Ok((stdout_override, stderr_override))
-}
-
-fn stdin_stdio(spec: ProcessStdioSpec) -> PyResult<std::process::Stdio> {
-    match spec {
-        ProcessStdioSpec::Stdout => {
-            Err(PyValueError::new_err("STDOUT can only be used for stderr"))
-        }
-        spec => output_stdio(spec),
-    }
 }
 
 fn output_stdio(spec: ProcessStdioSpec) -> PyResult<std::process::Stdio> {
@@ -183,5 +209,46 @@ fn stderr_stdout_stdio(stdout: ProcessStdioSpec) -> PyResult<std::process::Stdio
         ProcessStdioSpec::Pipe | ProcessStdioSpec::Stdout => Err(PyRuntimeError::new_err(
             "invalid stderr=STDOUT configuration",
         )),
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    fn spec(tag: u8) -> ProcessStdioSpec {
+        match tag {
+            0 => ProcessStdioSpec::Inherit,
+            1 => ProcessStdioSpec::Pipe,
+            2 => ProcessStdioSpec::DevNull,
+            3 => ProcessStdioSpec::Fd(17),
+            4 => ProcessStdioSpec::Stdout,
+            _ => unreachable!("tag is constrained to a stdio variant"),
+        }
+    }
+
+    #[kani::proof]
+    fn merge_process_stdio_routing_is_total_and_preserves_error_precedence() {
+        let stdin_tag: u8 = kani::any();
+        let stdout_tag: u8 = kani::any();
+        let stderr_tag: u8 = kani::any();
+        kani::assume(stdin_tag < 5);
+        kani::assume(stdout_tag < 5);
+        kani::assume(stderr_tag < 5);
+
+        let stdin = spec(stdin_tag);
+        let stdout = spec(stdout_tag);
+        let stderr = spec(stderr_tag);
+        let plan = process_stdio_plan(stdin, stdout, stderr);
+
+        if stdin == ProcessStdioSpec::Stdout {
+            assert_eq!(plan, Err(ProcessStdioPlanError::StdinRedirect));
+        } else if stdout == ProcessStdioSpec::Stdout {
+            assert_eq!(plan, Err(ProcessStdioPlanError::StdoutRedirect));
+        } else if stdout == ProcessStdioSpec::Pipe && stderr == ProcessStdioSpec::Stdout {
+            assert_eq!(plan, Ok(ProcessStdioPlan::SharedOutputPipe));
+        } else {
+            assert_eq!(plan, Ok(ProcessStdioPlan::Standard));
+        }
     }
 }

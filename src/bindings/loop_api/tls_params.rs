@@ -138,7 +138,7 @@ mod verification {
     use super::{TlsValidationError, TlsValidationInputs, tls_validation_error};
 
     #[kani::proof]
-    fn core_tls_validation_preserves_error_precedence() {
+    fn merge_tls_validation_preserves_error_precedence() {
         let ssl: bool = kani::any();
         let hostname: bool = kani::any();
         let handshake: bool = kani::any();

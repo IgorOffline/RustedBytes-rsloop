@@ -22,6 +22,26 @@ use super::{PendingProcessEvent, ProcessTransportCore};
 use crate::context::{ensure_running_loop, run_in_context};
 use crate::engine::{LoopCommand, LoopTransportCommand};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessEventKind {
+    PipeData,
+    PipeLost,
+    Exited,
+    Lost,
+}
+
+fn process_event_kind(event: &PendingProcessEvent) -> ProcessEventKind {
+    match event {
+        PendingProcessEvent::PipeDataReceived { .. } => ProcessEventKind::PipeData,
+        PendingProcessEvent::PipeConnectionLost { .. } => ProcessEventKind::PipeLost,
+        PendingProcessEvent::ProcessExited { .. } => ProcessEventKind::Exited,
+        PendingProcessEvent::ConnectionLost { .. } => ProcessEventKind::Lost,
+    }
+}
+
+fn process_event_stops_drain(kind: ProcessEventKind) -> bool {
+    kind == ProcessEventKind::Lost
+}
 impl ProcessTransportCore {
     pub(super) fn enqueue_pending_event(self: &Arc<Self>, event: PendingProcessEvent) {
         profiling::scope!("ProcessTransportCore::enqueue_pending_event");
@@ -60,6 +80,7 @@ impl ProcessTransportCore {
             }
 
             while let Some(event) = drained.pop_front() {
+                let stops_drain = process_event_stops_drain(process_event_kind(&event));
                 match event {
                     PendingProcessEvent::PipeDataReceived { fd, data } => {
                         profiling::scope!("process.pending.pipe_data_received");
@@ -95,9 +116,11 @@ impl ProcessTransportCore {
                     PendingProcessEvent::ConnectionLost { exc } => {
                         profiling::scope!("process.pending.connection_lost");
                         let _ = self.connection_lost_with_py(py, exc.map(PyRuntimeError::new_err));
-                        self.events_scheduled.store(false, Ordering::Release);
-                        return Ok(());
                     }
+                }
+                if stops_drain {
+                    self.events_scheduled.store(false, Ordering::Release);
+                    return Ok(());
                 }
             }
         }
@@ -173,5 +196,63 @@ impl ProcessTransportCore {
                 context.unbind().into_any(),
             )
         });
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::{ProcessEventKind, process_event_stops_drain};
+
+    fn event_kind(tag: u8) -> ProcessEventKind {
+        match tag % 4 {
+            0 => ProcessEventKind::PipeData,
+            1 => ProcessEventKind::PipeLost,
+            2 => ProcessEventKind::Exited,
+            _ => ProcessEventKind::Lost,
+        }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn extended_process_event_drain_delivers_exact_terminal_prefix() {
+        const EVENT_COUNT: usize = 6;
+        let mut events = [ProcessEventKind::PipeData; EVENT_COUNT];
+        for event in &mut events {
+            *event = event_kind(kani::any());
+        }
+
+        let mut delivered = [ProcessEventKind::PipeData; EVENT_COUNT];
+        let mut delivered_len = 0_usize;
+        let mut first_terminal = None;
+        for (index, event) in events.iter().copied().enumerate() {
+            delivered[delivered_len] = event;
+            delivered_len += 1;
+            if process_event_stops_drain(event) {
+                first_terminal = Some(index);
+                break;
+            }
+        }
+
+        assert_eq!(
+            delivered_len,
+            first_terminal.map_or(EVENT_COUNT, |index| index + 1)
+        );
+        for index in 0..delivered_len {
+            assert_eq!(delivered[index], events[index]);
+        }
+        if first_terminal.is_some() {
+            assert_eq!(delivered[delivered_len - 1], ProcessEventKind::Lost);
+        } else {
+            assert!(
+                !delivered[..delivered_len]
+                    .iter()
+                    .copied()
+                    .any(process_event_stops_drain)
+            );
+        }
+
+        kani::cover!(first_terminal == Some(0));
+        kani::cover!(first_terminal == Some(EVENT_COUNT - 1));
+        kani::cover!(first_terminal.is_none());
     }
 }

@@ -35,6 +35,47 @@ use crate::transport::process::{
 
 const PROCESS_UMASK_MAX: i64 = 0o777;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessTextMode {
+    Binary,
+    Text,
+    Conflict,
+}
+
+fn process_text_mode(
+    universal_newlines: bool,
+    text: Option<bool>,
+    has_encoding: bool,
+    has_errors: bool,
+) -> ProcessTextMode {
+    if universal_newlines && text == Some(false) {
+        ProcessTextMode::Conflict
+    } else if universal_newlines || text == Some(true) || has_encoding || has_errors {
+        ProcessTextMode::Text
+    } else {
+        ProcessTextMode::Binary
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NormalizedUmask {
+    Unchanged,
+    Value(u32),
+    Invalid,
+}
+
+fn normalize_process_umask(mask: i64) -> NormalizedUmask {
+    if mask == -1 {
+        NormalizedUmask::Unchanged
+    } else if (0..=PROCESS_UMASK_MAX).contains(&mask) {
+        NormalizedUmask::Value(
+            u32::try_from(mask).expect("validated umask is nonnegative and fits u32"),
+        )
+    } else {
+        NormalizedUmask::Invalid
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct UnixPreExecConfig {
     pub(super) restore_signals: bool,
@@ -214,15 +255,19 @@ pub(super) fn parse_process_text_config(
     errors: Option<Py<PyAny>>,
     text: Option<bool>,
 ) -> PyResult<Option<ProcessTextConfig>> {
-    if text == Some(false) && universal_newlines {
-        return Err(PyValueError::new_err(
-            "text and universal_newlines have different values",
-        ));
-    }
-    let text_enabled =
-        universal_newlines || text == Some(true) || encoding.is_some() || errors.is_some();
-    if !text_enabled {
-        return Ok(None);
+    match process_text_mode(
+        universal_newlines,
+        text,
+        encoding.is_some(),
+        errors.is_some(),
+    ) {
+        ProcessTextMode::Conflict => {
+            return Err(PyValueError::new_err(
+                "text and universal_newlines have different values",
+            ));
+        }
+        ProcessTextMode::Binary => return Ok(None),
+        ProcessTextMode::Text => {}
     }
     let encoding = if let Some(encoding) = encoding {
         encoding.bind(py).extract::<String>()?
@@ -460,13 +505,12 @@ fn apply_unix_misc_process_kw(kw: &mut UnixProcessKw<'_, '_>) -> PyResult<bool> 
     match kw.key {
         "umask" => {
             let mask = kw.value.extract::<i64>()?;
-            // Popen umask=-1 is default for "no change".
-            if mask != -1 {
-                if !(0..=PROCESS_UMASK_MAX).contains(&mask) {
+            match normalize_process_umask(mask) {
+                NormalizedUmask::Unchanged => {}
+                NormalizedUmask::Value(mask) => kw.unix.umask = Some(mask),
+                NormalizedUmask::Invalid => {
                     return Err(PyValueError::new_err("umask must be between 0 and 0o777"));
                 }
-                kw.unix.umask =
-                    Some(u32::try_from(mask).expect("validated umask is nonnegative and fits u32"));
             }
         }
         "preexec_fn" => {
@@ -518,6 +562,44 @@ fn apply_common_process_kwargs(
 
     pre_exec::apply(command, spawn_config.unix.clone());
     Ok(spawn_config)
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    fn merge_process_text_mode_precedence_is_exact() {
+        let universal_newlines: bool = kani::any();
+        let text: Option<bool> = kani::any();
+        let has_encoding: bool = kani::any();
+        let has_errors: bool = kani::any();
+
+        let mode = process_text_mode(universal_newlines, text, has_encoding, has_errors);
+        if universal_newlines && text == Some(false) {
+            assert_eq!(mode, ProcessTextMode::Conflict);
+        } else if universal_newlines || text == Some(true) || has_encoding || has_errors {
+            assert_eq!(mode, ProcessTextMode::Text);
+        } else {
+            assert_eq!(mode, ProcessTextMode::Binary);
+        }
+    }
+
+    #[kani::proof]
+    fn merge_process_umask_normalization_is_exact() {
+        let mask: i64 = kani::any();
+        match normalize_process_umask(mask) {
+            NormalizedUmask::Unchanged => assert_eq!(mask, -1),
+            NormalizedUmask::Value(value) => {
+                assert!((0..=PROCESS_UMASK_MAX).contains(&mask));
+                assert_eq!(i64::from(value), mask);
+            }
+            NormalizedUmask::Invalid => {
+                assert_ne!(mask, -1);
+                assert!(!(0..=PROCESS_UMASK_MAX).contains(&mask));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

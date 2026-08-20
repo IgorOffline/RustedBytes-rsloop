@@ -241,6 +241,24 @@ pub(super) fn fast_sock_connect<'py>(
     Ok(future_bound)
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::{WSAEISCONN, is_already_connected_errno, is_connect_in_progress_errno};
+
+    #[kani::proof]
+    fn merge_socket_connect_errno_classes_are_exact_and_disjoint() {
+        let errno: i32 = kani::any();
+        let already = is_already_connected_errno(errno);
+        let progress = is_connect_in_progress_errno(errno);
+
+        assert_eq!(already, errno == libc::EISCONN || errno == WSAEISCONN);
+        assert_eq!(
+            progress,
+            errno == libc::EINPROGRESS || errno == libc::EALREADY || errno == libc::EWOULDBLOCK
+        );
+        assert!(!(already && progress));
+    }
+}
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]

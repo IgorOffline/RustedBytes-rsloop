@@ -293,7 +293,7 @@ mod verification {
     use super::{DEFAULT_WRITE_BUFFER_HIGH_WATER, normalize_write_buffer_limits};
 
     #[kani::proof]
-    fn core_write_buffer_limits_are_ordered_and_overflow_free() {
+    fn merge_write_buffer_limits_are_ordered_and_overflow_free() {
         let high: Option<usize> = kani::any();
         let low: Option<usize> = kani::any();
         let normalized = normalize_write_buffer_limits(high, low);

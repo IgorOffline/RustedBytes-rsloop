@@ -20,6 +20,11 @@ pub(super) fn apply(command: &mut Command, config: UnixPreExecConfig) {
 pub(super) fn apply(_command: &mut Command, _config: UnixPreExecConfig) {}
 
 #[cfg(unix)]
+fn should_set_process_group(start_new_session: bool, process_group: i32) -> bool {
+    !(start_new_session && process_group == 0)
+}
+
+#[cfg(unix)]
 fn apply_in_child(config: &UnixPreExecConfig) -> std::io::Result<()> {
     restore_child_signals(config.restore_signals)?;
     clear_pass_fds_cloexec(&config.pass_fds)?;
@@ -92,7 +97,7 @@ fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<()> {
         }
     }
     if let Some(process_group) = config.process_group
-        && !(config.start_new_session && process_group == 0)
+        && should_set_process_group(config.start_new_session, process_group)
     {
         // SAFETY: called only inside the `pre_exec` child with numeric process IDs.
         let result = unsafe { libc::setpgid(0, process_group) };
@@ -129,6 +134,24 @@ fn apply_child_attributes(config: &UnixPreExecConfig) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(kani, unix))]
+mod verification {
+    use super::should_set_process_group;
+
+    #[kani::proof]
+    fn merge_process_group_setup_skips_only_the_setsid_zero_case() {
+        let start_new_session: bool = kani::any();
+        let process_group: i32 = kani::any();
+        let should_set = should_set_process_group(start_new_session, process_group);
+
+        assert_eq!(should_set, !(start_new_session && process_group == 0));
+        if !should_set {
+            assert!(start_new_session);
+            assert_eq!(process_group, 0);
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
