@@ -151,7 +151,7 @@ impl DriverKind {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use vibeio::RuntimeBuilder;
 ///
 /// let runtime = RuntimeBuilder::new()

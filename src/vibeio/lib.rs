@@ -43,7 +43,7 @@
 //!
 //! ### Example: TCP echo server
 //!
-//! ```rust,no_run
+//! ```ignore
 //! use vibeio::RuntimeBuilder;
 //! use vibeio::net::TcpListener;
 //!

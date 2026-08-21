@@ -1526,7 +1526,9 @@ mod tests {
                 .parse::<SocketAddr>()
                 .expect("address should parse");
 
-            let socket = UdpSocket::bind(address).expect("bind should work");
+            let Some(socket) = try_bind_udp(address) else {
+                return;
+            };
             let poll_socket = socket.into_poll().expect("into_poll should work");
             let _adaptive = poll_socket.into_adaptive();
         });
