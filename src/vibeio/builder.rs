@@ -4,24 +4,9 @@ use crate::vibeio::{blocking::BlockingThreadPool, driver::AnyDriver};
 
 #[cfg(target_os = "linux")]
 fn ensure_rsloop_platform() -> Result<(), std::io::Error> {
-    use std::ffi::CStr;
-
-    let mut info = std::mem::MaybeUninit::<libc::utsname>::zeroed();
-    if unsafe { libc::uname(info.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let info = unsafe { info.assume_init() };
-    let release = unsafe { CStr::from_ptr(info.release.as_ptr()) }.to_string_lossy();
-    let mut parts = release
-        .split('.')
-        .filter_map(|part| part.parse::<u32>().ok());
-    let version = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    if version < (6, 1) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!("rsloop requires Linux 6.1 or newer; detected {release}"),
-        ));
-    }
+    // Linux vendors frequently backport io_uring features, while containers
+    // can block its syscalls on otherwise supported kernels. Let driver
+    // initialization probe the actual capabilities and fall back as needed.
     Ok(())
 }
 

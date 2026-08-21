@@ -258,14 +258,21 @@ impl AnyDriver {
             .setup_taskrun_flag()
             .setup_defer_taskrun()
             .setup_submit_all();
+
+        // Prefer the newer single-threaded setup, but retain support for
+        // kernels that provide basic io_uring without every optimization.
         Self::new_uring_custom(builder)
+            .or_else(|_| Self::new_uring_custom(io_uring::IoUring::builder()))
     }
 
     #[inline]
     pub(crate) fn new_best() -> Result<Self, io::Error> {
         #[cfg(target_os = "linux")]
         {
-            Self::new_uring()
+            // io_uring may be unavailable because of the kernel version,
+            // vendor configuration, sysctls, or a container seccomp policy.
+            // Automatic selection must remain usable in all of those cases.
+            Self::new_uring().or_else(|_| Self::new_mio())
         }
 
         #[cfg(target_vendor = "apple")]
