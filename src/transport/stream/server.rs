@@ -22,7 +22,7 @@ use super::{PyServer, ServerCore, ServerCreateParams, ServerListener, ServerStat
 use crate::async_event::AsyncEvent;
 
 pub fn create_server(py: Python<'_>, params: ServerCreateParams) -> PyResult<Py<PyServer>> {
-    profiling::scope!("stream.create_server");
+    crate::profile_scope!("stream.create_server");
     let ServerCreateParams {
         loop_core,
         loop_obj,

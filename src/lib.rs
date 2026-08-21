@@ -34,6 +34,7 @@ pub(crate) mod vibeio;
 pub(crate) use platform::fd as fd_ops;
 #[cfg(windows)]
 pub(crate) use platform::windows_vibeio;
+pub(crate) use profiler::{profile_function, profile_scope};
 
 // Compatibility re-exports for the crate's existing Rust API. Internal module
 // registration imports from the owning modules directly, so these can be

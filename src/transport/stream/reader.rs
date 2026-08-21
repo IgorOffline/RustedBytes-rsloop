@@ -63,7 +63,7 @@ pub(super) fn run_stream_reader(
     mut reader: ReaderTarget,
     stop: Arc<AtomicBool>,
 ) {
-    profiling::scope!("stream.run_stream_reader");
+    crate::profile_scope!("stream.run_stream_reader");
     let Some(mut buf) =
         core.acquire_read_buffer_blocking(STREAM_READ_BUFFER_SIZE, Some(stop.as_ref()))
     else {
@@ -251,7 +251,7 @@ pub(crate) fn run_socket_reader_blocking(
     reader: ReaderTarget,
     stop: Arc<AtomicBool>,
 ) {
-    profiling::scope!("stream.run_socket_reader_blocking");
+    crate::profile_scope!("stream.run_socket_reader_blocking");
     run_stream_reader(core, reader, stop)
 }
 
@@ -260,7 +260,7 @@ pub(super) fn run_tls_reader(
     tls_state: SharedTlsIoState,
     stop: Arc<AtomicBool>,
 ) {
-    profiling::scope!("stream.run_tls_reader");
+    crate::profile_scope!("stream.run_tls_reader");
     let Some(mut plaintext) =
         core.acquire_read_buffer_blocking(STREAM_READ_BUFFER_SIZE, Some(stop.as_ref()))
     else {

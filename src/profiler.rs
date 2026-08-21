@@ -1,5 +1,27 @@
 //! Optional Tracy profiler lifecycle exposed to Python.
 
+/// Opens a named profiling scope when Tracy support is compiled in.
+///
+/// Default builds intentionally expand this macro to nothing, matching the
+/// previous `profiling` facade without retaining it as a dependency.
+macro_rules! profile_scope {
+    ($name:literal) => {
+        #[cfg(feature = "profiler")]
+        let _rsloop_tracy_span = tracy_client::span!($name, 0);
+    };
+}
+
+/// Opens a scope named after the enclosing function in profiler builds.
+macro_rules! profile_function {
+    () => {
+        #[cfg(feature = "profiler")]
+        let _rsloop_tracy_span = tracy_client::span!();
+    };
+}
+
+pub(crate) use profile_function;
+pub(crate) use profile_scope;
+
 use pyo3::prelude::*;
 
 #[cfg(feature = "profiler")]

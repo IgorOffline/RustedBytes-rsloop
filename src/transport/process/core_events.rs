@@ -44,7 +44,7 @@ fn process_event_stops_drain(kind: ProcessEventKind) -> bool {
 }
 impl ProcessTransportCore {
     pub(super) fn enqueue_pending_event(self: &Arc<Self>, event: PendingProcessEvent) {
-        profiling::scope!("ProcessTransportCore::enqueue_pending_event");
+        crate::profile_scope!("ProcessTransportCore::enqueue_pending_event");
         self.pending_events
             .lock()
             .expect("poisoned process pending queue")
@@ -63,7 +63,7 @@ impl ProcessTransportCore {
     }
 
     pub(crate) fn drain_pending_events_with_py(self: &Arc<Self>, py: Python<'_>) -> PyResult<()> {
-        profiling::scope!("ProcessTransportCore::drain_pending_events_with_py");
+        crate::profile_scope!("ProcessTransportCore::drain_pending_events_with_py");
         let mut drained = VecDeque::new();
         loop {
             {
@@ -83,7 +83,7 @@ impl ProcessTransportCore {
                 let stops_drain = process_event_stops_drain(process_event_kind(&event));
                 match event {
                     PendingProcessEvent::PipeDataReceived { fd, data } => {
-                        profiling::scope!("process.pending.pipe_data_received");
+                        crate::profile_scope!("process.pending.pipe_data_received");
                         if let Err(err) = self.pipe_data_received_with_py(py, fd, &data) {
                             self.report_error(err, "subprocess pipe_data_received failed");
                             let _ = self.connection_lost_with_py(py, None);
@@ -92,7 +92,7 @@ impl ProcessTransportCore {
                         }
                     }
                     PendingProcessEvent::PipeConnectionLost { fd, exc } => {
-                        profiling::scope!("process.pending.pipe_connection_lost");
+                        crate::profile_scope!("process.pending.pipe_connection_lost");
                         if let Err(err) = self.pipe_connection_lost_value_with_py(
                             py,
                             fd,
@@ -105,7 +105,7 @@ impl ProcessTransportCore {
                         }
                     }
                     PendingProcessEvent::ProcessExited { returncode } => {
-                        profiling::scope!("process.pending.process_exited");
+                        crate::profile_scope!("process.pending.process_exited");
                         if let Err(err) = self.process_exited_with_py(py, returncode) {
                             self.report_error(err, "subprocess process_exited failed");
                             let _ = self.connection_lost_with_py(py, None);
@@ -114,7 +114,7 @@ impl ProcessTransportCore {
                         }
                     }
                     PendingProcessEvent::ConnectionLost { exc } => {
-                        profiling::scope!("process.pending.connection_lost");
+                        crate::profile_scope!("process.pending.connection_lost");
                         let _ = self.connection_lost_with_py(py, exc.map(PyRuntimeError::new_err));
                     }
                 }

@@ -236,7 +236,7 @@ impl StreamTransportCore {
     }
 
     pub(super) fn enqueue_pending_read_event(self: &Arc<Self>, event: PendingReadEvent) {
-        profiling::scope!("StreamTransportCore::enqueue_pending_read_event");
+        crate::profile_scope!("StreamTransportCore::enqueue_pending_read_event");
         // A start_tls handoff retires this core before reusing the socket. A
         // cancelled plaintext reader may still complete once; never deliver
         // that late event to the application protocol after the handoff.
@@ -309,7 +309,7 @@ impl StreamTransportCore {
         self: &Arc<Self>,
         py: Python<'_>,
     ) -> PyResult<()> {
-        profiling::scope!("StreamTransportCore::drain_pending_read_events_with_py");
+        crate::profile_scope!("StreamTransportCore::drain_pending_read_events_with_py");
         if transport_stats_enabled() {
             TRANSPORT_PYTHON_READ_DRAINS.fetch_add(1, Ordering::Relaxed);
         }
@@ -348,7 +348,7 @@ impl StreamTransportCore {
             while let Some(event) = drained.pop_front() {
                 match event {
                     PendingReadEvent::Data(data) => {
-                        profiling::scope!("stream.pending.data");
+                        crate::profile_scope!("stream.pending.data");
                         self.record_pending_read_drained(data.len());
                         drained_events += 1;
                         drained_bytes += data.len();
@@ -421,7 +421,7 @@ impl StreamTransportCore {
                         }
                     }
                     PendingReadEvent::Eof => {
-                        profiling::scope!("stream.pending.eof");
+                        crate::profile_scope!("stream.pending.eof");
                         if let Err(err) =
                             self.flush_pending_data_with_py(py, &mut pending_data, fast_path)
                         {
@@ -460,7 +460,7 @@ impl StreamTransportCore {
                         }
                     }
                     PendingReadEvent::ConnectionLost(message) => {
-                        profiling::scope!("stream.pending.connection_lost");
+                        crate::profile_scope!("stream.pending.connection_lost");
                         if let Err(err) =
                             self.flush_pending_data_with_py(py, &mut pending_data, fast_path)
                         {
@@ -479,7 +479,7 @@ impl StreamTransportCore {
                         return Ok(());
                     }
                     PendingReadEvent::PauseWriting => {
-                        profiling::scope!("stream.pending.pause_writing");
+                        crate::profile_scope!("stream.pending.pause_writing");
                         if let Err(err) =
                             self.flush_pending_data_with_py(py, &mut pending_data, fast_path)
                         {
@@ -495,7 +495,7 @@ impl StreamTransportCore {
                         self.pause_writing_with_py(py)?;
                     }
                     PendingReadEvent::ResumeWriting => {
-                        profiling::scope!("stream.pending.resume_writing");
+                        crate::profile_scope!("stream.pending.resume_writing");
                         if let Err(err) =
                             self.flush_pending_data_with_py(py, &mut pending_data, fast_path)
                         {

@@ -315,7 +315,7 @@ impl LoopCore {
     /// avoid a channel round trip. `LoopCoreError::ChannelClosed` means the
     /// dispatcher has already terminated.
     pub fn send_command(&self, command: LoopCommand) -> Result<(), LoopCoreError> {
-        profiling::scope!("LoopCore::send_command");
+        crate::profile_scope!("LoopCore::send_command");
         let command = match self.try_handle_local_command(command) {
             Ok(()) => return Ok(()),
             Err(command) => command,
@@ -395,7 +395,7 @@ impl LoopCore {
         args: Py<PyTuple>,
         context: Option<Py<PyAny>>,
     ) -> PyResult<Py<super::callbacks::PyHandle>> {
-        profiling::scope!("LoopCore::schedule_callback");
+        crate::profile_scope!("LoopCore::schedule_callback");
         let (captured, context_needs_run) = capture_context(py, context)?;
         let ready = ReadyCallback::new(
             py,
@@ -427,7 +427,7 @@ impl LoopCore {
         args: Py<PyTuple>,
         context: Option<Py<PyAny>>,
     ) -> PyResult<(Arc<ReadyCallback>, f64)> {
-        profiling::scope!("LoopCore::schedule_timer");
+        crate::profile_scope!("LoopCore::schedule_timer");
         let (captured, context_needs_run) = capture_context(py, context)?;
         let ready = Arc::new(ReadyCallback::new(
             py,
@@ -456,8 +456,8 @@ impl LoopCore {
     /// to Python again before invoking user code.
     ///
     /// Returns an error if the loop is closed or already running.
-    #[profiling::function]
     pub fn run_forever(self: &Arc<Self>, py: Python<'_>, loop_obj: Py<PyAny>) -> PyResult<()> {
+        crate::profile_function!();
         {
             let mut state = self.state.lock().expect("poisoned loop state");
             if state.closed {
@@ -579,11 +579,11 @@ impl LoopCore {
                     .expect("ready batch was checked as non-empty");
                 match item {
                     ReadyItem::Stop => {
-                        profiling::scope!("ready.stop");
+                        crate::profile_scope!("ready.stop");
                         self.state.lock().expect("poisoned loop state").stopping = true;
                     }
                     ReadyItem::Callback(callback) => {
-                        profiling::scope!("ready.callback");
+                        crate::profile_scope!("ready.callback");
                         let should_rearm = matches!(
                             callback.kind(),
                             CallbackKind::Reader(_) | CallbackKind::Writer(_)
@@ -599,7 +599,7 @@ impl LoopCore {
                         }
                     }
                     ReadyItem::HandleCallback(handle) => {
-                        profiling::scope!("ready.handle_callback");
+                        crate::profile_scope!("ready.handle_callback");
                         if let Some(err) =
                             self.execute_ready(py, Some(&loop_obj), handle.get().ready())?
                         {
@@ -608,7 +608,7 @@ impl LoopCore {
                         }
                     }
                     ReadyItem::FutureSetResult { future, value } => {
-                        profiling::scope!("ready.future_set_result");
+                        crate::profile_scope!("ready.future_set_result");
                         let future = future.bind(py);
                         if !crate::python_names::call_method0(
                             py,
@@ -627,7 +627,7 @@ impl LoopCore {
                         }
                     }
                     ReadyItem::FutureSetException { future, value } => {
-                        profiling::scope!("ready.future_set_exception");
+                        crate::profile_scope!("ready.future_set_exception");
                         let future = future.bind(py);
                         if !crate::python_names::call_method0(
                             py,
@@ -646,19 +646,19 @@ impl LoopCore {
                         }
                     }
                     ReadyItem::StreamTransportRead(core) => {
-                        profiling::scope!("ready.stream_transport_read");
+                        crate::profile_scope!("ready.stream_transport_read");
                         core.drain_pending_read_events_with_py(py)?;
                     }
                     ReadyItem::StreamTransportWrite(core) => {
-                        profiling::scope!("ready.stream_transport_write");
+                        crate::profile_scope!("ready.stream_transport_write");
                         core.flush_pending_direct_write();
                     }
                     ReadyItem::ProcessTransport(core) => {
-                        profiling::scope!("ready.process_transport");
+                        crate::profile_scope!("ready.process_transport");
                         core.drain_pending_events_with_py(py)?;
                     }
                     ReadyItem::ServerAccepted { server, stream } => {
-                        profiling::scope!("ready.server_accepted");
+                        crate::profile_scope!("ready.server_accepted");
                         if let Err(err) = crate::transport::stream::spawn_accepted_transport_with_py(
                             py, &server, stream,
                         ) {
@@ -671,7 +671,7 @@ impl LoopCore {
                         fd,
                         wait_errno,
                     } => {
-                        profiling::scope!("ready.connect_completed");
+                        crate::profile_scope!("ready.connect_completed");
                         self.resolve_connect_completed(py, future, fd, wait_errno)?;
                     }
                 }
@@ -825,7 +825,7 @@ impl LoopCore {
     /// Already-ready callbacks are still processed according to asyncio's
     /// stop semantics before `run_forever` returns.
     pub fn schedule_stop(&self) -> Result<(), LoopCoreError> {
-        profiling::scope!("LoopCore::schedule_stop");
+        crate::profile_scope!("LoopCore::schedule_stop");
         self.send_command(LoopCommand::RequestStop)
     }
 
@@ -835,7 +835,7 @@ impl LoopCore {
     /// `LoopCoreError::Running`. Tracked I/O tasks are cancelled before the
     /// on-thread runtime is dropped.
     pub fn close(&self) -> Result<(), LoopCoreError> {
-        profiling::scope!("LoopCore::close");
+        crate::profile_scope!("LoopCore::close");
         {
             let mut state = self.state.lock().expect("poisoned loop state");
             if state.running {
@@ -946,7 +946,7 @@ impl LoopCore {
         loop_obj: Option<&Py<PyAny>>,
         ready: &ReadyCallback,
     ) -> PyResult<Option<PyErr>> {
-        profiling::scope!("LoopCore::execute_ready");
+        crate::profile_scope!("LoopCore::execute_ready");
         if ready.cancelled() {
             return Ok(None);
         }
@@ -1439,5 +1439,43 @@ mod wake_tests {
 
         assert!(!wake.ready_pending.load(Ordering::Acquire));
         assert!(started.elapsed() >= Duration::from_millis(1));
+    }
+
+    #[test]
+    fn command_channel_accepts_concurrent_producers_and_disconnects_cleanly() {
+        const PRODUCERS: usize = 8;
+        const COMMANDS_PER_PRODUCER: usize = 128;
+
+        let core = LoopCore::new();
+        let producers = (0..PRODUCERS)
+            .map(|_| {
+                let core = Arc::clone(&core);
+                std::thread::spawn(move || {
+                    for _ in 0..COMMANDS_PER_PRODUCER {
+                        core.send_command(LoopCommand::RequestStop)
+                            .expect("dispatcher should accept concurrent commands");
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for producer in producers {
+            producer.join().expect("command producer");
+        }
+
+        core.send_command(LoopCommand::Close)
+            .expect("dispatcher close command");
+        core.runtime_thread
+            .lock()
+            .expect("runtime thread mutex")
+            .take()
+            .expect("runtime thread")
+            .join()
+            .expect("runtime thread join");
+
+        assert!(matches!(
+            core.send_command(LoopCommand::RequestStop),
+            Err(LoopCoreError::ChannelClosed)
+        ));
     }
 }

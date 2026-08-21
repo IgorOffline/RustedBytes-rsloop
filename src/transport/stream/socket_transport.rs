@@ -45,7 +45,7 @@ pub fn transport_from_socket(
     spawn_context: TransportSpawnContext,
     socket_obj: Py<PyAny>,
 ) -> PyResult<Py<PyStreamTransport>> {
-    profiling::scope!("stream.transport_from_socket");
+    crate::profile_scope!("stream.transport_from_socket");
     #[allow(unused_variables)]
     let family = socket_obj.getattr(py, "family")?.extract::<i32>(py)?;
     #[cfg(unix)]
@@ -74,7 +74,7 @@ pub fn transport_from_socket_tls(
     socket_obj: Py<PyAny>,
     tls: ClientTlsSettings,
 ) -> PyResult<Py<PyStreamTransport>> {
-    profiling::scope!("stream.transport_from_socket_tls");
+    crate::profile_scope!("stream.transport_from_socket_tls");
     #[allow(unused_variables)]
     let family = socket_obj.getattr(py, "family")?.extract::<i32>(py)?;
     #[cfg(unix)]
@@ -107,7 +107,7 @@ pub fn transport_from_socket_server_tls(
     socket_obj: Py<PyAny>,
     tls: ServerTlsSettings,
 ) -> PyResult<Py<PyStreamTransport>> {
-    profiling::scope!("stream.transport_from_socket_server_tls");
+    crate::profile_scope!("stream.transport_from_socket_server_tls");
     #[allow(unused_variables)]
     let family = socket_obj.getattr(py, "family")?.extract::<i32>(py)?;
     #[cfg(unix)]

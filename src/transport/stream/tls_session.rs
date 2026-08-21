@@ -138,7 +138,7 @@ pub(super) fn complete_tls_handshake(
     timeout: Duration,
     server: Option<&Weak<ServerCore>>,
 ) -> io::Result<()> {
-    profiling::scope!("stream.complete_tls_handshake");
+    crate::profile_scope!("stream.complete_tls_handshake");
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if tls_server_closed(server) {

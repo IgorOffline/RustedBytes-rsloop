@@ -42,7 +42,7 @@ pub(super) fn create_server<'py>(
     py: Python<'py>,
     params: CreateServerParams,
 ) -> PyResult<Bound<'py, PyAny>> {
-    profiling::scope!("PyLoop::create_server");
+    crate::profile_scope!("PyLoop::create_server");
     let CreateServerParams {
         protocol_factory,
         host,

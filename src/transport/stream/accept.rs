@@ -227,7 +227,7 @@ pub(super) fn schedule_accepted_transport(
 }
 
 pub(super) fn run_tcp_accept_loop(params: BlockingAcceptLoop<StdTcpListener>) {
-    profiling::scope!("stream.run_tcp_accept_loop");
+    crate::profile_scope!("stream.run_tcp_accept_loop");
     let BlockingAcceptLoop {
         server,
         listener,
@@ -277,7 +277,7 @@ pub(super) fn run_tcp_accept_loop(params: BlockingAcceptLoop<StdTcpListener>) {
     }
 }
 pub(crate) async fn run_server_accept_task(server: Arc<ServerCore>, listener: ServerListener) {
-    profiling::scope!("stream.run_server_accept_task");
+    crate::profile_scope!("stream.run_server_accept_task");
     match listener {
         ServerListener::Tcp(listener) => run_tcp_accept_task(server, listener).await,
         #[cfg(unix)]
@@ -337,7 +337,7 @@ pub(super) async fn run_windows_tcp_accept_lane(
     server: Arc<ServerCore>,
     listener: Rc<VibeTcpListener>,
 ) {
-    profiling::scope!("stream.run_tcp_accept_task");
+    crate::profile_scope!("stream.run_tcp_accept_task");
     loop {
         if server.is_closed() {
             return;
@@ -370,7 +370,7 @@ pub(super) async fn run_windows_tcp_accept_lane(
 
 #[cfg(not(windows))]
 pub(super) async fn run_tcp_accept_lane(server: Arc<ServerCore>, listener: StdTcpListener) {
-    profiling::scope!("stream.run_tcp_accept_task");
+    crate::profile_scope!("stream.run_tcp_accept_task");
     let listener = match VibeTcpListener::from_std(listener) {
         Ok(listener) => listener,
         Err(err) => {

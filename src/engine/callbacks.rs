@@ -129,7 +129,7 @@ impl ReadyCallback {
     /// A nested-context error falls back to direct invocation because that means
     /// the desired context is already active on this thread.
     pub fn invoke(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        profiling::scope!("ReadyCallback::invoke");
+        crate::profile_scope!("ReadyCallback::invoke");
         if !self.context_needs_run {
             return self.invoke_direct(py);
         }
@@ -152,7 +152,7 @@ impl ReadyCallback {
     }
 
     fn invoke_direct(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        profiling::scope!("ReadyCallback::invoke_direct");
+        crate::profile_scope!("ReadyCallback::invoke_direct");
         match &self.args {
             CallbackArgs::None => call_callback_noargs(py, &self.callback),
             CallbackArgs::One(arg) => call_callback_onearg(py, &self.callback, arg),
